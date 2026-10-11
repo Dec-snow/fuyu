@@ -46,6 +46,7 @@ arboard = "3"
 chrono = "0.4"
 # 联网工具的 URL 解析（校验 scheme / host / 重定向目标）。
 url = "2"
+tauri-plugin-autostart = "2.7.0"
 
 [target.'cfg(windows)'.dependencies]
 # 圆角属性（DWM）+ 划词取词（SendInput / GetAsyncKeyState）。

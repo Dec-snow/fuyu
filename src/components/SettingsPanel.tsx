@@ -10,13 +10,14 @@ import {
 } from "../lib/appearance";
 import { sortModels } from "../lib/models";
 import { blankRole } from "../lib/roles";
+import { formatDiagnostics, hasProblems } from "../lib/diagnostics";
 import { toolLabel } from "../lib/tools";
 import { api } from "../services/api";
 import { useChat } from "../stores/chat";
 import { applyAppearance, previewAppearance, useConfig } from "../stores/config";
 import { useProviders } from "../stores/providers";
 import { useUi } from "../stores/ui";
-import type { RolePreset } from "../types";
+import type { Diagnostics, RolePreset } from "../types";
 import { CopyButton } from "./CopyButton";
 
 type Tab = "models" | "appearance" | "general" | "data" | "about";
@@ -958,6 +959,8 @@ function GeneralTab() {
         </div>
       </label>
 
+      <AutostartField />
+
       <label className="field checkbox">
         <input
           type="checkbox"
@@ -1201,18 +1204,188 @@ function DataTab() {
 
       <div className="field">
         <span>危险操作</span>
-        <button
-          className="danger-button"
-          onClick={async () => {
-            if (!window.confirm("清空全部会话历史？此操作不可撤销。")) return;
-            await api.clearAllHistory();
-            await startNewConversation();
-            await refreshConversations();
-          }}
-        >
-          清空全部历史
-        </button>
+        <div className="danger-row">
+          <button
+            className="danger-button"
+            onClick={async () => {
+              if (!window.confirm("清空全部会话历史？此操作不可撤销。")) return;
+              await api.clearAllHistory();
+              await startNewConversation();
+              await refreshConversations();
+            }}
+          >
+            清空全部历史
+          </button>
+          <button
+            className="danger-button"
+            title="把偏好恢复成默认值；服务商与 API Key 会保留"
+            onClick={async () => {
+              if (
+                !window.confirm(
+                  "重置全部设置？\n\n外观、提示词、角色、工具白名单、代理等会恢复默认值。\n服务商与 API Key 会保留。",
+                )
+              ) {
+                return;
+              }
+              await useConfig.getState().resetSettings();
+              pushNotice("设置已重置（服务商与密钥保留）");
+            }}
+          >
+            重置设置
+          </button>
+          <button
+            className="danger-button"
+            title="从系统凭据管理器里删除全部服务商的 API Key"
+            onClick={async () => {
+              if (
+                !window.confirm(
+                  "删除全部 API Key？\n\n密钥从系统凭据管理器里删除，不可恢复，需要重新填写。",
+                )
+              ) {
+                return;
+              }
+              const removed = await api.deleteAllApiKeys();
+              await useProviders.getState().load();
+              pushNotice(`已删除 ${removed} 个服务商的密钥`);
+            }}
+          >
+            删除全部密钥
+          </button>
+        </div>
       </div>
+
+      <DiagnosticsPanel />
+    </div>
+  );
+}
+
+/**
+ * 诊断信息面板。
+ *
+ * 以前出错只能「从命令行启动 exe 看 stderr」—— 对普通用户等于没有。
+ * 这里把环境与最近的错误汇总成一段可以直接复制的文本，用户反馈问题时
+ * 粘给开发者就行。**刻意不含消息内容与密钥**：它天然是一条外发通道。
+ */
+/**
+ * 开机自启。
+ *
+ * 勾选框显示的是**系统里的真实状态**，不是配置里的值：用户可能用任务管理器
+ * 或注册表把自启项删掉了。显示配置值的话会出现「勾还打着、开机却没启动」，
+ * 而用户完全不知道去哪儿查。
+ *
+ * 另外自启会带 `--minimized`：开机时只在后台待着，不弹悬浮窗（见 `main.tsx`）。
+ */
+function AutostartField() {
+  const config = useConfig((s) => s.config);
+  const pushNotice = useUi((s) => s.pushNotice);
+  const [actual, setActual] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    void api
+      .autostartStatus()
+      .then(setActual)
+      .catch(() => setActual(null));
+  }, []);
+
+  if (!config) return null;
+
+  const toggle = async (next: boolean) => {
+    setBusy(true);
+    try {
+      const updated = await api.setAutostart(next);
+      useConfig.setState({ config: updated });
+      setActual(await api.autostartStatus().catch(() => next));
+    } catch (e) {
+      // 系统那边没成功就**不**改界面状态：否则会出现「勾上了、其实没生效」。
+      pushNotice(`设置开机自启失败：${e}`);
+      setActual(await api.autostartStatus().catch(() => null));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <label className="field checkbox">
+      <input
+        type="checkbox"
+        disabled={busy}
+        // 读不到系统状态（命令失败）时退回配置里的值，至少不是空白。
+        checked={actual ?? config.autostart}
+        onChange={(e) => void toggle(e.target.checked)}
+      />
+      <span>
+        开机时自动启动
+        {actual !== null && actual !== config.autostart
+          ? "（系统里已是这个状态，与设置不一致，已按系统为准）"
+          : ""}
+      </span>
+    </label>
+  );
+}
+
+function DiagnosticsPanel() {
+  const [data, setData] = useState<Diagnostics | null>(null);
+  const [open, setOpen] = useState(false);
+  const pushNotice = useUi((s) => s.pushNotice);
+
+  const load = async () => {
+    try {
+      setData(await api.diagnostics());
+    } catch (e) {
+      pushNotice(`读取诊断信息失败：${e}`);
+    }
+  };
+
+  useEffect(() => {
+    if (open && !data) void load();
+    // data 不进依赖：只在首次展开时拉一次，之后的刷新靠「重新读取」按钮。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  return (
+    <div className="field">
+      <span>诊断信息</span>
+      <div className="danger-row">
+        <button className="ghost-button" onClick={() => setOpen((v) => !v)}>
+          {open ? "隐藏" : "显示诊断信息"}
+          {!open && hasProblems(data) ? "（有错误记录）" : ""}
+        </button>
+        {open ? (
+          <>
+            <button className="ghost-button" onClick={() => void load()}>
+              重新读取
+            </button>
+            <button
+              className="ghost-button"
+              onClick={async () => {
+                const removed = await api.clearLogs();
+                await load();
+                pushNotice(`已清空 ${removed} 条日志`);
+              }}
+            >
+              清空日志
+            </button>
+          </>
+        ) : null}
+      </div>
+
+      {open ? (
+        data ? (
+          <div className="diagnostics">
+            <div className="path-row">
+              <CopyButton
+                text={formatDiagnostics(data)}
+                idle="复制诊断信息"
+                title="复制成一段可直接粘贴的文本"
+              />
+            </div>
+            <pre className="diagnostics-text">{formatDiagnostics(data)}</pre>
+          </div>
+        ) : (
+          <div className="settings-hint">读取中…</div>
+        )
+      ) : null}
     </div>
   );
 }

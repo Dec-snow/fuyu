@@ -160,8 +160,18 @@ async function boot() {
   applyAppearance(config);
 
   await api.setWindowMode(expanded).catch(() => undefined);
-  await api.showWindow().catch(() => undefined);
-  playEnter();
+
+  // 开机自启（带 `--minimized`）时**不**主动显示窗口。
+  //
+  // 自启的真实意图是「它已经在后台待着，按 Alt+Space 就能出来」。不加这一条，
+  // 每次开机都会有一个置顶悬浮窗蹦到屏幕中间挡住视线 —— 而且开发时手动启动
+  // 永远复现不了这个问题。`playEnter()` 也一起跳过：窗口都不显示，入场动效
+  // 只是白跑一遍。
+  const startedMinimized = await api.startedMinimized().catch(() => false);
+  if (!startedMinimized) {
+    await api.showWindow().catch(() => undefined);
+    playEnter();
+  }
 
   // 4) 跟随系统主题变化。
   if (typeof window.matchMedia === "function") {

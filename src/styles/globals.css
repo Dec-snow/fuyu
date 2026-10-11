@@ -1048,6 +1048,48 @@ textarea {
   line-height: 1.5;
 }
 
+/* ---- 数据页：危险操作一排 + 诊断信息 ---- */
+
+.danger-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.path-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.path {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--fg-dim);
+  word-break: break-all;
+  user-select: text;
+}
+
+/* 诊断文本用小字号等宽、可选中：用户要把它复制出去。
+   限高 + 滚动，避免一屏日志把整个设置面板顶下去。 */
+.diagnostics-text {
+  margin: 6px 0 0;
+  max-height: 220px;
+  overflow: auto;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--code-bg);
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+
 .composer-input {
   display: flex;
   align-items: flex-end;

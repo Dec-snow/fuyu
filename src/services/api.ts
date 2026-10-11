@@ -9,6 +9,7 @@ import type {
   AppConfig,
   AppInfo,
   Conversation,
+  Diagnostics,
   MessageHit,
   ProvidersState,
   RolePreset,
@@ -141,6 +142,25 @@ export const api = {
       "import_history",
       { json },
     ),
+
+  // ---- 诊断与数据管理
+  diagnostics: () => invoke<Diagnostics>("diagnostics"),
+  clearLogs: () => invoke<number>("clear_logs"),
+  /** 重置设置（保留服务商与密钥），返回重置后的整份配置。 */
+  resetSettings: () => invoke<AppConfig>("reset_settings"),
+  /** 删除所有服务商的 API Key，返回删掉了几个。 */
+  deleteAllApiKeys: () => invoke<number>("delete_all_api_keys"),
+
+  // ---- 开机自启
+  //
+  // 插件只在 Rust 侧使用（见 `src-tauri/src/commands/autostart.rs`），
+  // 前端调的是下面这两个命令 —— 不用给前端加依赖、也不用放开插件权限。
+  setAutostart: (enabled: boolean) =>
+    invoke<AppConfig>("set_autostart", { enabled }),
+  /** 读系统里的**真实**状态（用户可能在任务管理器里关掉了）。 */
+  autostartStatus: () => invoke<boolean>("autostart_status"),
+  /** 这一次是不是「开机自启带 --minimized」启动的。 */
+  startedMinimized: () => invoke<boolean>("started_minimized"),
 
   // ---- 历史
   listConversations: (limit?: number) =>

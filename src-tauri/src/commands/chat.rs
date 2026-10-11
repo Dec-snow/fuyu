@@ -132,6 +132,7 @@ pub async fn chat_send(
     let cleanup_id = rid.clone();
     let task_token = token.clone();
     let context_budget = config.read(|c| c.context_budget_tokens as usize);
+    let logs = state.logs.clone();
     tauri::async_runtime::spawn(async move {
         run_stream(
             app,
@@ -148,6 +149,7 @@ pub async fn chat_send(
             tool_approvals,
             session_tool_approvals,
             config_store,
+            logs,
         )
         .await;
         // 任务无论怎么结束都要把令牌摘掉，否则 map 会一直涨。
@@ -276,6 +278,7 @@ async fn run_stream(
     tool_approvals: PendingToolApprovals,
     session_tool_approvals: SessionToolApprovals,
     config: ConfigStore,
+    logs: crate::diagnostics::LogBuffer,
 ) {
     let emitter = EventEmitter::new(app);
 
@@ -450,6 +453,7 @@ async fn run_stream(
                 &tool,
                 request.approval_session_id.as_deref(),
                 &token,
+                &logs,
             )
             .await;
 
@@ -574,7 +578,14 @@ async fn run_stream(
     let succeeded = terminal_error.is_none() && !cancelled;
 
     let terminal = match terminal_error {
-        Some(e) => terminal_event(&request_id, Err(e)),
+        Some(e) => {
+            // 记一条诊断日志。放在这里而不是错误产生的地方：无论错误来自建连、
+            // SSE 解析还是「工具轮次用满」，终态只有这一处，记在这里一处就够。
+            // **只记服务商 / 模型 / 错误码与信息** —— 诊断信息是要给用户复制
+            // 出去给人看的，绝不能带上消息内容。
+            logs.record("chat", format!("{} · {} · {e}", provider.id, model));
+            terminal_event(&request_id, Err(e))
+        }
         None if cancelled => ChatEvent::Cancelled {
             request_id: request_id.clone(),
         },
@@ -776,6 +787,7 @@ async fn request_approval(
     tool: &ToolDefinition,
     approval_session_id: Option<&str>,
     token: &tokio_util::sync::CancellationToken,
+    logs: &crate::diagnostics::LogBuffer,
 ) -> bool {
     // 1) 永久允许。
     if config.read(|c| c.always_allowed_tools.iter().any(|t| t == tool.name)) {
@@ -859,7 +871,10 @@ async fn request_approval(
                         }
                         Ok(())
                     }) {
-                        eprintln!("记住「永久允许」（工具 {}）失败：{e}", tool.name);
+                        logs.record(
+                            "config",
+                            format!("记住「永久允许」（工具 {}）失败：{e}", tool.name),
+                        );
                     }
                 }
                 ApprovalScope::Once => {}

@@ -441,6 +441,22 @@ impl Database {
         })
     }
 
+    /// 当前库结构版本（诊断页要显示它：升级出问题时这是第一个要看的值）。
+    pub fn schema_version(&self) -> AppResult<i64> {
+        self.with_conn(|conn| Ok(conn.query_row("PRAGMA user_version", [], |r| r.get(0))?))
+    }
+
+    /// `(会话数, 消息数)`。诊断页用。
+    pub fn counts(&self) -> AppResult<(i64, i64)> {
+        self.with_conn(|conn| {
+            let conversations: i64 =
+                conn.query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get(0))?;
+            let messages: i64 =
+                conn.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))?;
+            Ok((conversations, messages))
+        })
+    }
+
     /// 导出全部会话与消息（**含图片**）。
     ///
     /// 图片原样带走：备份悄悄丢掉一部分数据比文件大更糟 ——

@@ -69,6 +69,8 @@ interface ConfigState {
   patch: (patch: SettingsPatch) => Promise<void>;
   setShortcut: (shortcut: string) => Promise<void>;
   setQuickActionShortcut: (shortcut: string) => Promise<void>;
+  /** 重置设置（保留服务商与密钥）。 */
+  resetSettings: () => Promise<void>;
   clearError: () => void;
 }
 
@@ -116,6 +118,20 @@ export const useConfig = create<ConfigState>((set) => ({
     await api.setQuickActionShortcut(shortcut);
     const config = await api.getConfig();
     set({ config });
+  },
+
+  /**
+   * 重置设置：后端把偏好恢复成默认值（保留服务商与密钥），
+   * 这里把返回的整份配置应用上，并同步主题与外观变量。
+   *
+   * 不同步的话会出现「设置重置了、但界面还是旧主题」——
+   * 因为主题/透明度/字号是写在 DOM 上的，不是从 store 直接渲染的。
+   */
+  resetSettings: async () => {
+    const config = await api.resetSettings();
+    applyTheme(config.theme);
+    applyAppearance(config);
+    set({ config, error: null });
   },
 
   clearError: () => set({ error: null }),

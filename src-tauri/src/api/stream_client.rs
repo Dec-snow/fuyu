@@ -398,10 +398,18 @@ mod tests {
 
     struct MockReply {
         status: u16,
-        /// 按顺序、每段之间留 3ms 间隔写出去 —— 模拟 TCP 分片。
+        /// 按顺序、每段之间留 `gap_ms` 间隔写出去 —— 模拟 TCP 分片。
         chunks: Vec<Vec<u8>>,
         /// 写完 chunks 后不结束连接（用于测取消）。
         hang: bool,
+        /// 相邻两段之间的间隔。
+        ///
+        /// 做成可配的，是因为「取消」那条测试踩过坑：它原来用默认的 3ms
+        /// 间隔 + 「睡 25ms 再取消」，于是**取消和第一片到达在赛跑** ——
+        /// 机器一忙（并行跑测试时）第一片还没处理就取消了，测试随机失败。
+        /// 现在那条测试把间隔拉到 500ms、睡到 150ms 再取消，
+        /// 两边都留出足够余量，不再依赖调度运气。
+        gap_ms: u64,
     }
 
     impl MockReply {
@@ -410,6 +418,7 @@ mod tests {
                 status: 200,
                 chunks,
                 hang: false,
+                gap_ms: 3,
             }
         }
         fn status(status: u16, body: &str) -> Self {
@@ -417,13 +426,19 @@ mod tests {
                 status,
                 chunks: vec![body.as_bytes().to_vec()],
                 hang: false,
+                gap_ms: 3,
             }
         }
-        fn hanging(chunks: Vec<Vec<u8>>) -> Self {
+        /// 挂住不结束（用于测取消），两片之间隔 `gap_ms`。
+        ///
+        /// 间隔做成参数而不是写死 3ms：见 [`Self::gap_ms`] 的注释 ——
+        /// 「睡一小会儿再取消」这种写法必须和它拉开足够距离，否则就是赛跑。
+        fn hanging(chunks: Vec<Vec<u8>>, gap_ms: u64) -> Self {
             Self {
                 status: 200,
                 chunks,
                 hang: true,
+                gap_ms,
             }
         }
     }
@@ -528,7 +543,7 @@ mod tests {
                         break;
                     }
                     let _ = socket.flush().await;
-                    tokio::time::sleep(Duration::from_millis(3)).await;
+                    tokio::time::sleep(Duration::from_millis(reply.gap_ms)).await;
                 }
 
                 if reply.hang {
@@ -834,27 +849,31 @@ mod tests {
 
     #[tokio::test]
     async fn cancelling_stops_the_stream_and_keeps_partial_content() {
-        let (url, _) = mock_server(vec![MockReply::hanging(vec![
-            delta("先给你一半"),
-            delta("这一半不该到达"),
-        ])])
+        // 两片之间隔 500ms，第一片几乎是立刻到的 —— 这样「睡 150ms 再取消」
+        // 在两边都有很大余量：第一片一定已经处理完，第二片一定还没发。
+        //
+        // 原来这里用的是默认 3ms 间隔 + 睡 25ms：取消和第一片到达在赛跑，
+        // 并行跑测试、机器一忙就会随机失败（而且失败信息看起来像产品 bug）。
+        let (url, _) = mock_server(vec![MockReply::hanging(
+            vec![delta("先给你一半"), delta("这一半不该到达")],
+            500,
+        )])
         .await;
 
         let token = CancellationToken::new();
         let cancel_from = token.clone();
         tokio::spawn(async move {
-            // 等第一段到达之后再取消。
-            tokio::time::sleep(Duration::from_millis(25)).await;
+            tokio::time::sleep(Duration::from_millis(150)).await;
             cancel_from.cancel();
         });
 
         let (outcome, events) = run(&url, &token).await;
 
         assert!(outcome.cancelled, "应当以“已取消”结束");
-        assert!(
-            outcome.content.starts_with("先给你一半"),
-            "已到达的内容必须保留，实际为 {:?}",
-            outcome.content
+        // 现在可以断言**正好**只收到第一片 —— 这才是这条测试想表达的东西。
+        assert_eq!(
+            outcome.content, "先给你一半",
+            "已到达的内容要保留，后面的不该被写进去"
         );
         assert!(outcome.error.is_none());
         assert_eq!(deltas(&events), outcome.content);

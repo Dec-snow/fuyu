@@ -55,6 +55,11 @@ pub struct AppState {
     /// 「本次会话允许」的授权，键 `(approval_session_id, tool_name)`。
     /// 换会话就换 scope，即使应用不重启也不会沿用旧授权。
     pub session_tool_approvals: SessionToolApprovals,
+    /// 有界诊断日志（见 [`crate::diagnostics`]）。
+    ///
+    /// 出错时往里记一条：界面上那条提示一刷新就没了，而「诊断信息」页
+    /// 要能让用户把现场复制下来反馈。**只记错误码与信息，绝不记密钥或消息内容。**
+    pub logs: crate::diagnostics::LogBuffer,
 }
 
 impl AppState {
@@ -65,6 +70,7 @@ impl AppState {
             cancellations: Arc::new(Mutex::new(HashMap::new())),
             tool_approvals: Arc::new(Mutex::new(HashMap::new())),
             session_tool_approvals: Arc::new(Mutex::new(HashSet::new())),
+            logs: crate::diagnostics::LogBuffer::new(),
         }
     }
 

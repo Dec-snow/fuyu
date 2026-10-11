@@ -168,6 +168,13 @@ pub struct AppConfig {
     /// 角色预设（内置 + 用户自建）。
     #[serde(default = "Role::presets")]
     pub roles: Vec<Role>,
+    /// 开机自启。
+    ///
+    /// 这里存的是**用户的选择**；系统里的真实状态可能被任务管理器改掉，
+    /// 所以界面上显示的是 `autostart_status` 命令读回来的值（见
+    /// `commands/autostart.rs`）。
+    #[serde(default)]
+    pub autostart: bool,
 }
 
 fn default_window_opacity() -> f32 {
@@ -209,6 +216,7 @@ impl Default for AppConfig {
             window_opacity: default_window_opacity(),
             message_font_size: default_font_size(),
             roles: Role::presets(),
+            autostart: false,
         }
     }
 }

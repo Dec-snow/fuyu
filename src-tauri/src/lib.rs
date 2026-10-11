@@ -10,6 +10,7 @@
 mod agent;
 mod api;
 mod commands;
+mod diagnostics;
 mod errors;
 mod models;
 mod state;
@@ -42,6 +43,15 @@ pub fn run() {
                 })
                 .build(),
         )
+        // 开机自启插件。**只在 Rust 侧用它**（见 `commands/autostart.rs`）：
+        // 前端调我们自己的命令，所以不必给前端加依赖、也不必在 capabilities
+        // 里放开插件权限 —— 少一层权限面。
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            // 自启时带上 `--minimized`：开机时直接弹出一个置顶悬浮窗很打扰，
+            // 用户要的是「它已经在后台待着，按 Alt+Space 就能出来」。
+            Some(vec!["--minimized"]),
+        ))
         .manage(state::AppState::new())
         .invoke_handler(tauri::generate_handler![
             // ---- 对话
@@ -54,6 +64,15 @@ pub fn run() {
             // ---- 备份
             commands::backup::export_history,
             commands::backup::import_history,
+            // ---- 诊断与数据管理
+            commands::diagnostics::diagnostics,
+            commands::diagnostics::clear_logs,
+            commands::diagnostics::reset_settings,
+            commands::diagnostics::delete_all_api_keys,
+            // ---- 开机自启
+            commands::autostart::set_autostart,
+            commands::autostart::autostart_status,
+            commands::autostart::started_minimized,
             // ---- 设置
             commands::settings::app_info,
             commands::settings::get_config,

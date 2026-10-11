@@ -88,6 +88,8 @@ export interface AppConfig {
   messageFontSize: number;
   /** 角色预设（内置 + 自建）。 */
   roles: RolePreset[];
+  /** 用户的「开机自启」选择；系统里的真实状态可能被任务管理器改掉。 */
+  autostart: boolean;
 }
 
 export interface Conversation {
@@ -106,6 +108,32 @@ export interface Conversation {
   summaryMessageCount: number;
   /** 这个会话用的人设 id（`null` = 用全局系统提示词）。 */
   roleId: string | null;
+}
+
+/** 一条诊断日志。 */
+export interface LogEntry {
+  at: number;
+  /** 来源：`chat` / `config` / `provider` / `db` / `tool`。 */
+  source: string;
+  message: string;
+}
+
+/** 「设置 → 数据 → 诊断信息」要显示的全部内容。 */
+export interface Diagnostics {
+  version: string;
+  os: string;
+  arch: string;
+  dbPath: string;
+  dbBytes: number;
+  dbVersion: number;
+  conversations: number;
+  messages: number;
+  configPath: string;
+  configBytes: number;
+  providers: number;
+  webSearchConfigured: boolean;
+  alwaysAllowedTools: string[];
+  logs: LogEntry[];
 }
 
 export interface StoredMessage {

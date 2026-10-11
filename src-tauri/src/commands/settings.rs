@@ -6,7 +6,7 @@ use tauri::State;
 use crate::errors::{AppError, AppResult};
 use crate::models::config::AppInfo;
 use crate::storage::config::{
-    AppConfig, ConfigStore, MAX_FONT_SIZE, MIN_FONT_SIZE, MIN_WINDOW_OPACITY,
+    AppConfig, ConfigStore, Role, MAX_FONT_SIZE, MIN_FONT_SIZE, MIN_WINDOW_OPACITY,
 };
 use crate::storage::database::Database;
 
@@ -58,6 +58,59 @@ pub struct SettingsPatch {
     pub window_opacity: Option<f32>,
     /// 正文字号 px（会被收进 `MIN_FONT_SIZE ..= MAX_FONT_SIZE`）。
     pub message_font_size: Option<f32>,
+    /// 角色预设。整表覆写 —— 与 `always_allowed_tools` 同一个思路：
+    /// 界面上的操作是「改一个 / 删一个」，整表覆写比算差集简单也更难出错。
+    pub roles: Option<Vec<Role>>,
+}
+
+/// 角色数量上限。
+///
+/// 不是洁癖：角色提示词会被拼进每一次请求，一份塞了几百个角色的配置会让
+/// 每个请求白白多花几千 token，设置面板也会长到没法用。
+const MAX_ROLES: usize = 50;
+/// 单个角色提示词的长度上限（字符数）。
+const MAX_ROLE_PROMPT_CHARS: usize = 4_000;
+
+/// 规整角色列表：名字与提示词不能为空、id 不能重复、数量与长度都有上限。
+///
+/// 坏数据返回 `Err` 而不是静默丢弃：这些值会被原样发给模型，
+/// 悄悄改掉用户写的东西比报错更让人困惑。
+fn sanitize_roles(roles: Vec<Role>) -> AppResult<Vec<Role>> {
+    if roles.len() > MAX_ROLES {
+        return Err(AppError::invalid(format!("角色最多 {MAX_ROLES} 个")));
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(roles.len());
+    for mut role in roles {
+        role.id = role.id.trim().to_string();
+        role.name = role.name.trim().to_string();
+        role.prompt = role.prompt.trim().to_string();
+
+        if role.id.is_empty() {
+            return Err(AppError::invalid("角色 id 不能为空"));
+        }
+        if role.name.is_empty() {
+            return Err(AppError::invalid("角色名字不能为空"));
+        }
+        if role.prompt.is_empty() {
+            return Err(AppError::invalid(format!(
+                "角色「{}」的提示词不能为空",
+                role.name
+            )));
+        }
+        if role.prompt.chars().count() > MAX_ROLE_PROMPT_CHARS {
+            return Err(AppError::invalid(format!(
+                "角色「{}」的提示词太长（上限 {MAX_ROLE_PROMPT_CHARS} 字）",
+                role.name
+            )));
+        }
+        if !seen.insert(role.id.clone()) {
+            return Err(AppError::invalid(format!("角色 id 重复：{}", role.id)));
+        }
+        out.push(role);
+    }
+    Ok(out)
 }
 
 /// 把用户给的不透明度收进合法区间。
@@ -185,6 +238,9 @@ pub async fn update_settings(
         if let Some(v) = patch.message_font_size {
             cfg.message_font_size = clamp_font_size(v)?;
         }
+        if let Some(roles) = patch.roles {
+            cfg.roles = sanitize_roles(roles)?;
+        }
         // 改完代理立刻重建 HTTP 客户端，否则要重启才生效。
         Ok(cfg.clone())
     })
@@ -245,6 +301,74 @@ mod tests {
         assert_eq!(clamp_font_size(2.0).unwrap(), MIN_FONT_SIZE);
         assert_eq!(clamp_font_size(99.0).unwrap(), MAX_FONT_SIZE);
         assert_eq!(clamp_font_size(15.0).unwrap(), 15.0);
+    }
+
+    // ---- 角色预设：这些值会被原样拼进每次请求，所以坏数据必须挡在写盘之前
+
+    fn role(id: &str, name: &str, prompt: &str) -> Role {
+        Role {
+            id: id.to_string(),
+            name: name.to_string(),
+            prompt: prompt.to_string(),
+            builtin: false,
+        }
+    }
+
+    #[test]
+    fn a_sane_role_list_passes_and_gets_trimmed() {
+        let out = sanitize_roles(vec![role(" r1 ", "  翻译官 ", "  你是翻译。  ")]).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].id, "r1");
+        assert_eq!(out[0].name, "翻译官");
+        assert_eq!(out[0].prompt, "你是翻译。");
+    }
+
+    #[test]
+    fn blank_name_or_prompt_is_rejected() {
+        assert!(sanitize_roles(vec![role("r1", "   ", "prompt")]).is_err());
+        assert!(sanitize_roles(vec![role("r1", "名字", "   ")]).is_err());
+        assert!(sanitize_roles(vec![role("  ", "名字", "prompt")]).is_err());
+    }
+
+    #[test]
+    fn duplicate_ids_are_rejected() {
+        // 重复 id 会让「会话绑定哪个角色」变得取决于遍历顺序 ——
+        // 同一份配置在不同机器上可能解析出不同的角色。
+        let err =
+            sanitize_roles(vec![role("dup", "甲", "p1"), role("dup", "乙", "p2")]).unwrap_err();
+        assert!(err.message.contains("重复"));
+    }
+
+    #[test]
+    fn too_many_roles_are_rejected() {
+        let many: Vec<Role> = (0..(MAX_ROLES + 1))
+            .map(|i| role(&format!("r{i}"), "n", "p"))
+            .collect();
+        assert!(sanitize_roles(many).is_err());
+        let ok: Vec<Role> = (0..MAX_ROLES)
+            .map(|i| role(&format!("r{i}"), "n", "p"))
+            .collect();
+        assert!(sanitize_roles(ok).is_ok());
+    }
+
+    #[test]
+    fn an_overlong_prompt_is_rejected() {
+        let long = "啊".repeat(MAX_ROLE_PROMPT_CHARS + 1);
+        let err = sanitize_roles(vec![role("r1", "长", &long)]).unwrap_err();
+        assert!(err.message.contains("太长"));
+        // 边界值本身要能通过（不能差一位）
+        let at_limit = "啊".repeat(MAX_ROLE_PROMPT_CHARS);
+        assert!(sanitize_roles(vec![role("r1", "长", &at_limit)]).is_ok());
+    }
+
+    #[test]
+    fn the_builtin_presets_themselves_are_valid() {
+        // 内置模板必须能通过自己的校验，否则「重置设置」会把配置写成非法状态。
+        let presets = Role::presets();
+        assert!(!presets.is_empty());
+        let out = sanitize_roles(presets).unwrap();
+        assert!(out.iter().all(|r| r.builtin));
+        assert!(out.iter().all(|r| !r.prompt.is_empty()));
     }
 
     #[test]

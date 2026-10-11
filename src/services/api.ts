@@ -11,6 +11,7 @@ import type {
   Conversation,
   MessageHit,
   ProvidersState,
+  RolePreset,
   StoredMessage,
 } from "../types";
 
@@ -40,6 +41,8 @@ export interface SettingsPatch {
   windowOpacity?: number;
   /** 正文字号 px；后端会收进合法区间。 */
   messageFontSize?: number;
+  /** 角色预设（整表覆写）。 */
+  roles?: RolePreset[];
 }
 
 export interface UpsertProviderPayload {
@@ -141,6 +144,8 @@ export const api = {
     invoke<void>("rename_conversation", { id, title }),
   setConversationPinned: (id: string, pinned: boolean) =>
     invoke<void>("set_conversation_pinned", { id, pinned }),
+  setConversationRole: (id: string, roleId: string | null) =>
+    invoke<void>("set_conversation_role", { id, roleId }),
   deleteConversation: (id: string) =>
     invoke<void>("delete_conversation", { id }),
   clearAllHistory: () => invoke<void>("clear_all_history"),

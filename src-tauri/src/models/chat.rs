@@ -111,6 +111,9 @@ pub struct Conversation {
     /// 与前端发来的数组并不等长（前端会过滤空消息，删除消息也不会回退计数）。
     #[serde(default)]
     pub summary_covered_message_id: Option<String>,
+    /// 这个会话用的人设 id（`None` = 用全局系统提示词）。
+    #[serde(default)]
+    pub role_id: Option<String>,
 }
 
 /// 一条消息的终态。

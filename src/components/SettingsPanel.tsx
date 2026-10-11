@@ -9,12 +9,14 @@ import {
   opacityToPercent,
 } from "../lib/appearance";
 import { sortModels } from "../lib/models";
+import { blankRole } from "../lib/roles";
 import { toolLabel } from "../lib/tools";
 import { api } from "../services/api";
 import { useChat } from "../stores/chat";
 import { applyAppearance, previewAppearance, useConfig } from "../stores/config";
 import { useProviders } from "../stores/providers";
 import { useUi } from "../stores/ui";
+import type { RolePreset } from "../types";
 
 type Tab = "models" | "appearance" | "general" | "about";
 
@@ -646,6 +648,103 @@ function TemperatureField({
   );
 }
 
+/**
+ * 角色（人设）编辑器。
+ *
+ * 三条规则写在界面上而不是藏在代码里：
+ * - 内置模板**可以改、不能删**（删了就找不回来，用户只能手工补）；
+ * - 名字或提示词为空时**不提交**，本地回退并给一句提示 ——
+ *   后端会拒绝空值，与其弹一个「保存失败」的红条，不如根本不发出去；
+ * - 改完立刻生效于**下一个问题**（解析发生在发送那一刻，不是建会话时），
+ *   已有会话不会因为改了措辞而需要重建。
+ */
+function RoleEditor() {
+  const config = useConfig((s) => s.config);
+  const patch = useConfig((s) => s.patch);
+  const pushNotice = useUi((s) => s.pushNotice);
+  if (!config) return null;
+
+  const roles = config.roles ?? [];
+
+  // 失败时 store 里已经写了 error（会渲染成提示条），这里只负责别让
+  // 未处理的 promise 拒绝冒到控制台。
+  const save = (next: RolePreset[]) => {
+    void patch({ roles: next }).catch(() => undefined);
+  };
+
+  return (
+    <div className="field">
+      <span>角色（人设）—— 在输入框上方按会话切换；内置模板可改不可删</span>
+      <div className="role-editor">
+        {roles.map((role) => (
+          <div className="role-row" key={role.id}>
+            <div className="role-row-head">
+              <input
+                className="role-name"
+                value={role.name}
+                onChange={(e) =>
+                  save(
+                    roles.map((r) =>
+                      r.id === role.id ? { ...r, name: e.target.value } : r,
+                    ),
+                  )
+                }
+                onBlur={() => {
+                  if (role.name.trim() === "") {
+                    pushNotice("角色名字不能为空");
+                    // 名字被清空时不让它停留在空值上：后端会拒，界面也会显示一个
+                    // 「没有名字的角色」——回退成默认名比报错更省事。
+                    save(
+                      roles.map((r) =>
+                        r.id === role.id ? { ...r, name: "未命名角色" } : r,
+                      ),
+                    );
+                  }
+                }}
+              />
+              {role.builtin ? (
+                <span className="role-tag">内置</span>
+              ) : (
+                <button
+                  className="role-delete"
+                  title="删除这个角色"
+                  onClick={() => {
+                    if (window.confirm(`删除角色「${role.name}」？`)) {
+                      save(roles.filter((r) => r.id !== role.id));
+                    }
+                  }}
+                >
+                  删除
+                </button>
+              )}
+            </div>
+            <DebouncedTextarea
+              value={role.prompt}
+              rows={3}
+              onCommit={(next) => {
+                if (next.trim() === "") {
+                  pushNotice(`角色「${role.name}」的提示词不能为空`);
+                  return;
+                }
+                save(
+                  roles.map((r) => (r.id === role.id ? { ...r, prompt: next } : r)),
+                );
+              }}
+            />
+          </div>
+        ))}
+
+        <button
+          className="ghost-button"
+          onClick={() => save([...roles, blankRole()])}
+        >
+          + 新增角色
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function AppearanceTab() {
   const config = useConfig((s) => s.config);
   const patch = useConfig((s) => s.patch);
@@ -722,6 +821,8 @@ function AppearanceTab() {
           onCommit={(next) => void patch({ systemPrompt: next })}
         />
       </label>
+
+      <RoleEditor />
 
       <label className="field">
         <span>temperature（{config.temperature.toFixed(1)}）—— 越高回答越发散</span>

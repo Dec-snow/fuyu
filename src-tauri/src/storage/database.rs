@@ -169,6 +169,18 @@ const MIGRATIONS: &[Step] = &[
         column: "summary_covered_message_id",
         decl: "TEXT",
     },
+    // v13 —— 这个会话用哪个人设（角色预设的 id）。
+    //
+    // 为什么存 id 而不是把人设的提示词抄进 `system_prompt`：
+    // - 抄一份的话，用户改了角色的措辞，已有会话不会跟着变（像「改了没用」）；
+    // - 界面没法显示「当前是哪个角色」，只能拿提示词去反查，改个标点就匹配不上。
+    //
+    // 可空：NULL 表示没有指定人设，此时回落到全局系统提示词。
+    Step::AddColumn {
+        table: "conversations",
+        column: "role_id",
+        decl: "TEXT",
+    },
 ];
 
 /// 当前代码期望的库版本。
@@ -240,7 +252,8 @@ impl Database {
                 "SELECT c.id, c.title, c.provider_id, c.model_key, c.system_prompt,
                         c.pinned, c.created_at, c.updated_at,
                         (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id),
-                        c.summary, c.summary_message_count, c.summary_covered_message_id
+                        c.summary, c.summary_message_count, c.summary_covered_message_id,
+                        c.role_id
                  FROM conversations c
                  ORDER BY c.pinned DESC, c.updated_at DESC
                  LIMIT ?1",
@@ -261,7 +274,8 @@ impl Database {
                     "SELECT c.id, c.title, c.provider_id, c.model_key, c.system_prompt,
                             c.pinned, c.created_at, c.updated_at,
                             (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id),
-                            c.summary, c.summary_message_count, c.summary_covered_message_id
+                            c.summary, c.summary_message_count, c.summary_covered_message_id,
+                            c.role_id
                      FROM conversations c WHERE c.id = ?1",
                     [id],
                     map_conversation,
@@ -366,7 +380,22 @@ impl Database {
                 summary: String::new(),
                 summary_message_count: 0,
                 summary_covered_message_id: None,
+                role_id: None,
             })
+        })
+    }
+
+    /// 设置会话使用的人设（`None` = 回落到全局系统提示词）。
+    ///
+    /// 与 `set_conversation_pinned` 一样**不动** `updated_at`：
+    /// 换个角色不是「有新内容」，不该让这个会话跳到列表最前面。
+    pub fn set_conversation_role(&self, id: &str, role_id: Option<&str>) -> AppResult<()> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "UPDATE conversations SET role_id = ?2 WHERE id = ?1",
+                rusqlite::params![id, role_id],
+            )?;
+            Ok(())
         })
     }
 
@@ -794,6 +823,7 @@ fn map_conversation(row: &rusqlite::Row<'_>) -> rusqlite::Result<Conversation> {
         summary: row.get(9)?,
         summary_message_count: row.get(10)?,
         summary_covered_message_id: row.get(11)?,
+        role_id: row.get(12)?,
     })
 }
 
@@ -893,6 +923,56 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("chat.db");
         (Database::open(&path).unwrap(), dir)
+    }
+
+    #[test]
+    fn a_conversation_remembers_its_role_and_can_clear_it() {
+        let (db, dir) = temp_db();
+        let conv = db
+            .create_conversation("deepseek", "deepseek-chat", None)
+            .unwrap();
+        // 新会话默认没有人设（回落到全局系统提示词）
+        assert_eq!(conv.role_id, None);
+
+        db.set_conversation_role(&conv.id, Some("builtin-coder"))
+            .unwrap();
+        assert_eq!(
+            db.get_conversation(&conv.id)
+                .unwrap()
+                .unwrap()
+                .role_id
+                .as_deref(),
+            Some("builtin-coder")
+        );
+        // 列表里也必须带上：切走再切回来时界面要能显示「当前是哪个角色」，
+        // 只在 get_conversation 里有的话，列表驱动的界面会显示成「无角色」。
+        assert_eq!(
+            db.list_conversations(10).unwrap()[0].role_id.as_deref(),
+            Some("builtin-coder")
+        );
+
+        db.set_conversation_role(&conv.id, None).unwrap();
+        assert_eq!(
+            db.get_conversation(&conv.id).unwrap().unwrap().role_id,
+            None
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn switching_role_does_not_bump_the_conversation_to_the_top() {
+        // 换个角色不是「有新内容」。顶了 updated_at 的话，一个几个月前的旧会话
+        // 会因为「改了个人设」跳到列表最前面 —— 用户会以为里面来了新消息。
+        let (db, dir) = temp_db();
+        let conv = db.create_conversation("p", "m", None).unwrap();
+        let before = db.get_conversation(&conv.id).unwrap().unwrap().updated_at;
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        db.set_conversation_role(&conv.id, Some("builtin-writer"))
+            .unwrap();
+        let after = db.get_conversation(&conv.id).unwrap().unwrap().updated_at;
+        assert_eq!(before, after, "换人设不该改 updated_at");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

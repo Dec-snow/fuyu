@@ -34,6 +34,70 @@ pub struct ModelEntry {
     pub favorite: bool,
 }
 
+/// 一个人设（角色预设）。
+///
+/// 为什么不直接把提示词抄进会话的 `system_prompt` 字段：抄一份的话，
+/// 用户后来改了角色的措辞，已有会话不会跟着变（看起来像「改了没用」）；
+/// 而且界面没法显示「这个会话现在是哪个角色」，只能拿提示词去反查 ——
+/// 改一个标点就匹配不上了。所以会话存的是 `role_id`（见 v13 迁移）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Role {
+    pub id: String,
+    pub name: String,
+    pub prompt: String,
+    /// 内置模板：可以改内容，但不能删（删了就找不回来了）。
+    #[serde(default)]
+    pub builtin: bool,
+}
+
+impl Role {
+    /// 内置人设模板。
+    ///
+    /// 为什么要有内置的：绝大多数用户并不知道自己该写什么系统提示词，
+    /// 「翻译 / 代码 / 文案 / 总结」这四个覆盖了日常大部分场景，挑一个就能用。
+    /// 用户改的是**自己的副本**，模板本身保持在预设里。
+    pub fn presets() -> Vec<Role> {
+        vec![
+            Role {
+                id: "builtin-translator".to_string(),
+                name: "翻译官".to_string(),
+                builtin: true,
+                prompt: "你是一名专业翻译。把用户发来的内容翻译成自然、地道的目标语言；\
+                         未指定目标语言时按中英互译处理。只输出译文，不要解释、不要加引号，\
+                         保留原文的段落结构与代码块。"
+                    .to_string(),
+            },
+            Role {
+                id: "builtin-coder".to_string(),
+                name: "代码助手".to_string(),
+                builtin: true,
+                prompt: "你是一名严谨的工程师。回答以「能直接用」为准：先给结论或完整代码，\
+                         再简短说明关键点。代码要能运行并处理边界情况；\
+                         不确定的地方明确说出来，不要编造 API 或参数。"
+                    .to_string(),
+            },
+            Role {
+                id: "builtin-writer".to_string(),
+                name: "文案写手".to_string(),
+                builtin: true,
+                prompt: "你是一名中文文案写手。文字简洁、有节奏，避免空话套话和堆砌形容词。\
+                         需要多个版本时并列给出，并说明各自适合的场景。"
+                    .to_string(),
+            },
+            Role {
+                id: "builtin-summarizer".to_string(),
+                name: "严谨总结".to_string(),
+                builtin: true,
+                prompt: "你负责把材料压缩成要点。只写材料里确实存在的信息，\
+                         不要补充外部知识；区分「材料明确说的」和「你的推断」。\
+                         用短句与列表，保留关键数字与结论。"
+                    .to_string(),
+            },
+        ]
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderConfig {
@@ -101,6 +165,9 @@ pub struct AppConfig {
     /// 正文字号（[`MIN_FONT_SIZE`] ~ [`MAX_FONT_SIZE`]，px）。
     #[serde(default = "default_font_size")]
     pub message_font_size: f32,
+    /// 角色预设（内置 + 用户自建）。
+    #[serde(default = "Role::presets")]
+    pub roles: Vec<Role>,
 }
 
 fn default_window_opacity() -> f32 {
@@ -141,6 +208,7 @@ impl Default for AppConfig {
             web_search_endpoint: None,
             window_opacity: default_window_opacity(),
             message_font_size: default_font_size(),
+            roles: Role::presets(),
         }
     }
 }

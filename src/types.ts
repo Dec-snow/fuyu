@@ -15,6 +15,20 @@ export interface ModelEntry {
   favorite: boolean;
 }
 
+/**
+ * 一个人设（角色预设）。
+ *
+ * 注意名字：这个文件里已经有一个 `Role`（消息角色 user/assistant/system/tool），
+ * 两者完全不是一回事 —— 所以这里叫 `RolePreset`，别叫 `Role`。
+ */
+export interface RolePreset {
+  id: string;
+  name: string;
+  prompt: string;
+  /** 内置模板：可以改内容，但不能删（删了就找不回来了）。 */
+  builtin: boolean;
+}
+
 export interface ProviderView {
   id: string;
   name: string;
@@ -72,6 +86,8 @@ export interface AppConfig {
   windowOpacity: number;
   /** 正文字号（px，11 ~ 18）。影响聊天内容、输入框这些「要读的文字」。 */
   messageFontSize: number;
+  /** 角色预设（内置 + 自建）。 */
+  roles: RolePreset[];
 }
 
 export interface Conversation {
@@ -88,6 +104,8 @@ export interface Conversation {
   summary: string;
   /** 摘要已覆盖前面多少条消息。 */
   summaryMessageCount: number;
+  /** 这个会话用的人设 id（`null` = 用全局系统提示词）。 */
+  roleId: string | null;
 }
 
 export interface StoredMessage {

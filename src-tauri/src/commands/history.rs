@@ -81,6 +81,21 @@ pub async fn set_conversation_pinned(
     db.set_conversation_pinned(&id, pinned)
 }
 
+/// 给会话指定人设（`None` = 回落到全局系统提示词）。
+///
+/// 只让后端存 id，不在这里校验它是否存在：角色列表是配置的一部分，
+/// 用户可能先删角色再改会话 —— 那样会话会退化成「用全局提示词」，
+/// 而不是报错、把用户卡在一个改不动的状态里。解析交给发送时的
+/// `resolveRolePrompt`（找不到就当没设）。
+#[tauri::command]
+pub async fn set_conversation_role(
+    db: State<'_, Database>,
+    id: String,
+    role_id: Option<String>,
+) -> AppResult<()> {
+    db.set_conversation_role(&id, role_id.as_deref())
+}
+
 #[tauri::command]
 pub async fn delete_conversation(db: State<'_, Database>, id: String) -> AppResult<()> {
     db.delete_conversation(&id)

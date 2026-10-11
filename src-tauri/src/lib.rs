@@ -73,6 +73,7 @@ pub fn run() {
             commands::history::new_conversation_id,
             commands::history::rename_conversation,
             commands::history::set_conversation_pinned,
+            commands::history::set_conversation_role,
             commands::history::delete_conversation,
             commands::history::clear_all_history,
             commands::history::save_user_message,

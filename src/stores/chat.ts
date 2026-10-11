@@ -11,6 +11,7 @@ import {
   type StreamRoute,
 } from "../lib/chat-state";
 import { isTerminalEvent } from "../lib/event-gate";
+import { resolveRolePrompt } from "../lib/roles";
 import { api } from "../services/api";
 import { onChatEvent } from "../services/events";
 import type {
@@ -126,6 +127,8 @@ interface ChatStore extends ChatStreamState {
   newConversation: () => Promise<void>;
   renameConversation: (id: string, title: string) => Promise<void>;
   togglePinned: (id: string) => Promise<void>;
+  /** 给会话指定人设（`null` = 用全局系统提示词）。 */
+  setConversationRole: (id: string, roleId: string | null) => Promise<void>;
   deleteConversation: (id: string) => Promise<void>;
   send: (text: string, images?: string[]) => Promise<boolean>;
   deleteMessage: (messageId: string) => Promise<void>;
@@ -368,11 +371,20 @@ export const useChat = create<ChatStore>((set, get) => {
 
     // ---- 4) 发请求。真正的数据靠 chat-event 通道回来。
     try {
+      // 人设优先于全局系统提示词：会话绑了角色就用它的提示词，
+      // 没绑（或角色被删了）才回落到「设置 → 对话」里的全局提示词。
+      // 解析放在发送这一刻，而不是建会话的时候 —— 用户改了角色的措辞，
+      // 下一个问题就该用新措辞。
+      const activeConv = get().conversations.find((c) => c.id === convId);
+      const rolePrompt = resolveRolePrompt(
+        config?.roles ?? [],
+        activeConv?.roleId ?? null,
+      );
       await api.chatSend({
         providerId: target.providerId,
         modelKey: target.modelKey,
         messages: history,
-        systemPrompt: config?.systemPrompt ?? null,
+        systemPrompt: rolePrompt ?? config?.systemPrompt ?? null,
         conversationId: convId,
         requestId,
         temperature: config?.temperature ?? null,
@@ -502,6 +514,17 @@ export const useChat = create<ChatStore>((set, get) => {
       const conv = get().conversations.find((c) => c.id === id);
       if (!conv) return;
       await api.setConversationPinned(id, !conv.pinned);
+      await get().refreshConversations();
+    },
+
+    setConversationRole: async (id, roleId) => {
+      await api.setConversationRole(id, roleId);
+      // 本地先改，界面立刻反映；随后再拉一次保证与库一致。
+      set((s) => ({
+        conversations: s.conversations.map((c) =>
+          c.id === id ? { ...c, roleId } : c,
+        ),
+      }));
       await get().refreshConversations();
     },
 

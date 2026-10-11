@@ -4,6 +4,7 @@ import { visibleMessages } from "../lib/chat-state";
 import { useChat } from "../stores/chat";
 import { useUi } from "../stores/ui";
 import { ModelPicker } from "./ModelPicker";
+import { RolePicker } from "./RolePicker";
 
 /** 一条消息最多几张图。与后端 `commands/history.rs` 的常量保持一致。 */
 const MAX_IMAGES = 4;
@@ -180,6 +181,7 @@ export function Composer() {
     >
       <div className="composer-toolbar">
         <ModelPicker />
+        <RolePicker />
         <button
           className={`tools-toggle ${toolsEnabled ? "on" : ""}`}
           title={

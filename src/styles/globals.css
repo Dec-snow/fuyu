@@ -914,6 +914,32 @@ textarea {
   word-break: break-all;
 }
 
+/* ---- mermaid 图表 ---- */
+
+.md-mermaid {
+  margin: 6px 0;
+  /* 图可能比气泡宽：横向滚动而不是把气泡撑变形 */
+  overflow-x: auto;
+  text-align: center;
+}
+
+.md-mermaid svg {
+  /* mermaid 会写死 width/height，用 max-width 让它自适应气泡宽度 */
+  max-width: 100%;
+  height: auto;
+}
+
+/* 绘制中：保持和图表接近的高度，避免「先塌一下再撑开」的跳动 */
+.md-mermaid-loading {
+  margin: 6px 0;
+  padding: 14px 0;
+  text-align: center;
+  font-size: 11.5px;
+  color: var(--fg-faint);
+  border: 1px dashed var(--border);
+  border-radius: 9px;
+}
+
 .attachment {
   position: relative;
 }

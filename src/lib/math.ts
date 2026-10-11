@@ -59,36 +59,10 @@ export function renderMath(tex: string, displayMode: boolean): string | null {
 }
 
 /**
- * 危险内容的特征。用于「守住最后一道」的兜底检查。
- *
- * ⚠️ 这里踩过一个坑，值得写下来：**不能直接搜 `javascript:` 这个子串**。
- * KaTeX 在 `trust: false` 下会把 `\href{javascript:...}` 渲染成**红色的错误文本**，
- * 也就是 `javascript:` 会以**转义后的文本**出现在输出里；直接搜子串会把这种
- * 完全无害的情况判成危险，于是用户写 `$\text{javascript: 是一种协议}$` 时
- * 公式会莫名其妙退回源码。
- *
- * 正确的判据是**属性上下文**：协议只有出现在 `href=` / `src=` 的**值**里才危险。
- * 同理 `<a` 也不能直接搜 —— KaTeX 的 MathML 输出里有一个 `<annotation>` 标签。
+ * 危险内容的判据与兜底检查已经抽到 `lib/safe-html.ts`（mermaid 也要用同一套）。
+ * 这里重新导出，保持 `lib/math.ts` 对外接口不变。
  */
-const DANGEROUS = [
-  // 这些标签一旦出现就说明不是 KaTeX 的正常输出
-  /<\s*(script|iframe|object|embed|link|meta|base|form)\b/i,
-  // 事件处理器属性：onclick= / onerror= / onload= ...
-  /\son[a-z]+\s*=/i,
-  // 危险协议，但**必须**出现在 href/src 的值里才算
-  /(?:href|src|xlink:href)\s*=\s*["']?\s*(?:javascript|vbscript|data:text\/html)/i,
-];
-
-/**
- * 这段渲染结果能不能安全注入？
- *
- * 它是**兜底**，不是主要防线：主要防线是 `trust: false`。
- * 之所以还要有它：注入点是这个项目里风险最高的一行代码，
- * 多一道可以在测试里钉死的检查，成本极低。
- */
-export function looksSafe(html: string): boolean {
-  return !DANGEROUS.some((pattern) => pattern.test(html));
-}
+export { looksSafe } from "./safe-html";
 
 /** 公式源码要不要按「块级」渲染（`$$...$$`）。 */
 export function isDisplayMath(tex: string): boolean {

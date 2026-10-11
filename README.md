@@ -62,12 +62,12 @@
 | **文本文件附件** | 拖入或选 `txt / md / json / 代码 / 配置` 等纯文本文件（单文件 256 KB、最多 3 个、合计 512 KB），内容包进围栏后随问题一起发出。三层校验：扩展名白名单 → **字节像不像二进制**（挡住改了名的 exe）→ 是不是合法 UTF-8；围栏长度按内容里的连续反引号动态加长，防止文件内容提前闭合围栏 |
 | **代码高亮** | 40 种语言（Rust / TS / Python / SQL / YAML…），配色走主题变量，深浅两套都配过。走 lowlight 的**语法树**而不是 HTML 字符串 —— 所以代码高亮**一次都不注入 HTML** |
 | **数学公式** | 行内 `$x^2$` 与块级 `$$…$$`，KaTeX 渲染（含 MathML）。价格 `$5 和 $10` 不会被误判成公式。这是全项目**唯一**一处 `dangerouslySetInnerHTML`，见下方说明 |
+| **mermaid 图表** | ` ```mermaid ` 代码块直接画成流程图 / 时序图等。**按需加载**（671 KB 独立 chunk，不用图表就不下载），跟随深浅主题重绘，画不出来时退回显示源码而不是留空白 |
 
 ## 未实现（留给下一版）
 
 MCP 客户端、本地知识库（BM25）、长期记忆、技能（Skill）、
-文档解析（docx / xlsx / pptx / pdf）、文生图、一问多答、
-mermaid 图表、自动更新。
+文档解析（docx / xlsx / pptx / pdf）、文生图、一问多答、自动更新。
 
 这些功能在参考项目里都有实现。作者对参考项目的逐层拆解笔记（含原样摘抄的代码）
 **只保留在本地，没有随本仓库发布**，原因见文末「致谢与来源说明」；
@@ -187,21 +187,31 @@ npm run mock                  # 起一个本地假服务商（Node，零额外�
 
 ### 检查
 
-除单元测试外，仓库里还有两个**渲染验证**脚本（用于「高亮/公式到底有没有真的画出来」
-这类只看断言看不出来的问题）：
+前端主包约 722 KB（gzip 227 KB）—— 里面是 37 种语言的 highlighter 与 KaTeX；
+mermaid（671 KB）是**独立 chunk**，只有消息里真的出现图表才会加载。
+
+除单元测试外，仓库里还有一套**渲染验证**脚本（用于「高亮 / 公式 / 图表到底有没有
+真的画出来」这类只看断言看不出来的问题）。探针把检查结果编码成绿/红方块，
+截图后用 Python 读回来 —— 不依赖肉眼，也不需要 OCR：
 
 ```bash
-npm run build                                  # 先产出 CSS 与 KaTeX 字体
-npx vite-node tools/render-preview.tsx         # 用真实组件渲染出 dist/preview.html
-# 用无头浏览器截图，再读回页面里的探针像素
+npm run build                                  # 产出 CSS 与 KaTeX 字体
+
+# ① 服务端渲染：静态渲染路径（高亮、公式、主题变量）
+npx vite-node tools/render-preview.tsx
+node tools/build-preview.mjs                   # ② 客户端渲染：真在浏览器里挂载（mermaid 这类异步渲染）
+
+# 用无头浏览器截图，再读回探针像素
 msedge --headless=new --screenshot=dist/preview.png --window-size=640,780 \
   "file:///<你的路径>/dist/preview.html"
-python tools/check-preview.py dist/preview.png
+msedge --headless=new --virtual-time-budget=20000 --screenshot=dist/preview-mermaid.png \
+  --window-size=640,1100 "file:///<你的路径>/dist/preview-mermaid.html"
+
+python tools/check-preview.py dist/preview.png --set=ssr        # 8 项
+python tools/check-preview.py dist/preview-mermaid.png --set=client  # 11 项
 ```
 
-探针把 8 项渲染检查（KaTeX 结构 / display 模式 / 字体生效 / 高亮 token / 深色主题 /
-价格没被误判成公式 / 没有走降级分支 …）**编码成绿红方块**，截图后用 Python 读回来 ——
-不依赖肉眼，也不需要 OCR。详见 [`tools/`](./tools)。
+详见 [`tools/`](./tools)。
 
 ```bash
 npm run build                 # tsc --noEmit + vite build
@@ -219,7 +229,7 @@ cd src-tauri && cargo clippy --all-targets -- -D warnings
 | `cargo test` | **227 passed / 0 failed**（不联网；含真开 TCP 端口的流式 / 抓取 / 搜索集成测试，**真读写系统剪贴板**的往返测试，以及**备份导出→导入**的往返测试） |
 | `cargo clippy --all-targets -- -D warnings` | 通过，0 warning |
 | `cargo fmt --check` | 通过 |
-| `npm test`（vitest） | **221 passed / 0 failed**（含 11 条直接驱动 store 的竞态/接线测试，以及组件级渲染断言） |
+| `npm test`（vitest） | **230 passed / 0 failed**（含 11 条直接驱动 store 的竞态/接线测试，以及组件级渲染断言） |
 | `npm run build`（tsc + vite） | 通过，产物 267 KB JS / 16.4 KB CSS |
 | debug 二进制启动 | 进程存活，无 panic，无 stderr 输出 |
 | **旧版配置兼容** | 用「加字段之前写下的 `providers.json`」启动，进程正常存活（新字段回落默认值） |

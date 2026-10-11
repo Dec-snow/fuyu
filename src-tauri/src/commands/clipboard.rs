@@ -96,6 +96,25 @@ mod tests {
         };
         let previous = clipboard.get_text().ok();
 
+        // **环境能力探测**：剪贴板是全局共享资源，别的进程（浏览器、截图工具、
+        // 远程桌面）可能正持有它，这时读写都会失败。所以先探一下能不能用 ——
+        // 不能用就跳过，能用就下面用**硬断言**，两头都不含糊。
+        //
+        // 这条规则是踩出来的：跑完无头浏览器截图之后，这条测试开始报
+        // `ContentNotAvailable`，看起来像产品 bug；而同时用 PowerShell 直接
+        // 读写剪贴板也一样失败 —— 是环境被占住了，不是代码坏了。
+        if clipboard
+            .set_text("fuyu-clipboard-capability-probe")
+            .is_err()
+            || clipboard.get_text().is_err()
+        {
+            eprintln!("跳过：当前环境读写不了系统剪贴板（通常是有别的进程正占着它）");
+            if let Some(previous) = previous {
+                let _ = clipboard.set_text(previous);
+            }
+            return;
+        }
+
         let payload = "浮语剪贴板往返测试 · fuyu clipboard round-trip";
         write_clipboard(payload).expect("写入剪贴板应当成功");
         assert_eq!(

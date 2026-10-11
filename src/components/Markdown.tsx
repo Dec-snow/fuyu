@@ -1,7 +1,8 @@
-import { Fragment, useMemo, type ReactNode } from "react";
+import { Fragment, useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { highlightCode, type HighlightNode } from "../lib/highlight";
 import { isDisplayMath, looksSafe, renderMath } from "../lib/math";
+import { isMermaidBlock, renderMermaid } from "../lib/mermaid";
 import { splitInline, splitMarkdownBlocks } from "../lib/markdown";
 import { CopyButton } from "./CopyButton";
 
@@ -82,6 +83,72 @@ function CodeBlock({ language, content }: { language: string; content: string })
   );
 }
 
+/** 当前主题（mermaid 需要知道画深色图还是浅色图）。 */
+function currentMermaidTheme(): "default" | "dark" {
+  // SSR / 测试环境里没有 document
+  if (typeof document === "undefined") return "default";
+  return document.documentElement.dataset.theme === "dark" ? "dark" : "default";
+}
+
+/**
+ * mermaid 图表。
+ *
+ * 三个刻意的设计：
+ * - **异步渲染 + 加载态**：mermaid 是按需加载的（几百 KB），首次出现图表时
+ *   会先闪一下「正在绘制图表…」，而不是让整条消息卡住不显示；
+ * - **跟随主题**：`applyTheme` 改的是 `<html data-theme>`，React 不会因此重渲染，
+ *   所以自己用 `MutationObserver` 盯这个属性 —— 否则切到深色后**新画的图仍是浅色**
+ *   （mermaid 把主题缓存在初始化参数里，必须重新 initialize）；
+ * - **降级可见**：画不出来就按 mermaid 源码块显示（同样带复制按钮），
+ *   而不是留一块空白。
+ */
+function Mermaid({ code }: { code: string }) {
+  const [svg, setSvg] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [theme, setTheme] = useState(currentMermaidTheme);
+
+  useEffect(() => {
+    if (typeof MutationObserver === "undefined") return;
+    const observer = new MutationObserver(() => setTheme(currentMermaidTheme()));
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["data-theme"],
+    });
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    setFailed(false);
+    void renderMermaid(code, theme).then((result) => {
+      if (cancelled) return;
+      // 渲染失败时清掉旧图，避免主题切换后新旧两张图同时存在
+      if (result) setSvg(result.svg);
+      else {
+        setSvg(null);
+        setFailed(true);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [code, theme]);
+
+  if (svg) {
+    return (
+      <div
+        className="md-mermaid"
+        // 第二个（也是最后一个）注入点，安全性见 lib/mermaid.ts 顶部说明
+        dangerouslySetInnerHTML={{ __html: svg }}
+      />
+    );
+  }
+  if (failed) {
+    return <CodeBlock language="mermaid" content={code} />;
+  }
+  return <div className="md-mermaid-loading">正在绘制图表…</div>;
+}
+
 function renderInline(text: string): ReactNode[] {
   return splitInline(text).map((token, index) => {
     switch (token.kind) {
@@ -106,6 +173,10 @@ export const Markdown = ({ text }: { text: string }) => {
     <div className="md">
       {blocks.map((block, index) => {
         if (block.kind === "code") {
+          // mermaid 代码块不走高亮，直接画图（画不出来时组件内部会退回源码）
+          if (isMermaidBlock(block.language)) {
+            return <Mermaid key={index} code={block.content} />;
+          }
           return (
             <CodeBlock key={index} language={block.language} content={block.content} />
           );

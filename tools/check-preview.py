@@ -3,16 +3,34 @@
 import sys
 from PIL import Image
 
-CHECKS = [
-    "KaTeX 渲染出结构",
-    "块级公式（$$…$$）是 display 模式",
-    "KaTeX 的 CSS/字体生效",
-    "代码高亮产生了 token",
-    "带语言的代码块走了高亮分支",
-    "没有公式走到降级分支",
-    "价格 $5/$10 没被误判成公式",
-    "深色主题下同样有高亮",
-]
+# 两套检查项，与两个预览页里的探针顺序**必须一致**。
+#   ssr    —— tools/render-preview.tsx（服务端渲染，看不到 useEffect）
+#   client —— tools/preview-client.tsx（真在浏览器里挂载，能验证 mermaid）
+CHECK_SETS = {
+    "ssr": [
+        "KaTeX 渲染出结构",
+        "块级公式（$$…$$）是 display 模式",
+        "KaTeX 的 CSS/字体生效",
+        "代码高亮产生了 token",
+        "带语言的代码块走了高亮分支",
+        "没有公式走到降级分支",
+        "价格 $5/$10 没被误判成公式",
+        "深色主题下同样有高亮",
+    ],
+    "client": [
+        "KaTeX 渲染",
+        "KaTeX 字体生效",
+        "代码高亮 token",
+        "块级公式 display",
+        "公式没走降级",
+        "mermaid 渲染出 svg",
+        "svg 里有图元文字",
+        "没卡在加载态",
+        "深色主题也画了",
+        "svg 里没有脚本/事件",
+        "两张图都画了",
+    ],
+}
 
 # 高亮配色（light 主题的 --syntax-* 值）：截图里应当能找到这些精确颜色。
 #
@@ -31,13 +49,18 @@ def near(pixel, target, tol=12):
     return all(abs(int(a) - int(b)) <= tol for a, b in zip(pixel[:3], target))
 
 
-def main(path: str) -> int:
+def main(path: str, which: str = "ssr") -> int:
+    checks = CHECK_SETS.get(which)
+    if checks is None:
+        print(f"未知的检查集：{which}（可选：{', '.join(CHECK_SETS)}）")
+        return 2
+
     img = Image.open(path).convert("RGB")
-    print(f"截图 = {path}  尺寸 = {img.width}x{img.height}\n")
+    print(f"截图 = {path}  尺寸 = {img.width}x{img.height}  检查集 = {which}\n")
 
     print("=== 渲染检查（探针像素条，绿=通过 / 红=失败）===")
     failed = 0
-    for i, name in enumerate(CHECKS):
+    for i, name in enumerate(checks):
         x = i * 24 + 12  # 每个方块 24px，取中心
         y = 12
         px = img.getpixel((x, y))
@@ -70,4 +93,6 @@ def main(path: str) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1] if len(sys.argv) > 1 else "dist/preview.png"))
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    mode = next((a.split("=", 1)[1] for a in sys.argv[1:] if a.startswith("--set=")), "ssr")
+    sys.exit(main(args[0] if args else "dist/preview.png", mode))

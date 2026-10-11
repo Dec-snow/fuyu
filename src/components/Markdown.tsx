@@ -1,6 +1,7 @@
 import { Fragment, useMemo, type ReactNode } from "react";
 
 import { splitInline, splitMarkdownBlocks } from "../lib/markdown";
+import { CopyButton } from "./CopyButton";
 
 // 一个刻意做小的 Markdown 渲染器。
 //
@@ -32,9 +33,17 @@ export const Markdown = ({ text }: { text: string }) => {
       {blocks.map((block, index) =>
         block.kind === "code" ? (
           <div className="md-code" key={index}>
-            {block.language ? (
-              <div className="md-code-lang">{block.language}</div>
-            ) : null}
+            {/* 头部固定占位：没有语言标注时也要有一行，
+                否则「复制」按钮在代码块之间会上下跳动。 */}
+            <div className="md-code-head">
+              <span className="md-code-lang">{block.language ?? ""}</span>
+              <CopyButton
+                text={block.content}
+                className="md-code-copy"
+                idle="复制代码"
+                title="复制这个代码块"
+              />
+            </div>
             <pre>
               <code>{block.content}</code>
             </pre>

@@ -195,6 +195,51 @@ pub async fn remove_model(
     Ok(config.read(build_state))
 }
 
+/// 给模型打 / 取消收藏标记。
+///
+/// 为什么值得一个独立命令：收藏是「下拉框里列了十几个模型、我其实只用其中两个」
+/// 这个日常问题的唯一解法。而这个字段（`ModelEntry::favorite`）从第一版就在数据
+/// 结构里，**却一直没有界面能改它** —— 典型的「数据模型准备好了、产品功能没接上」。
+///
+/// 收藏**只影响展示顺序**，不动默认模型：星标一个模型不等于要把当前会话切过去，
+/// 那是 `set_default_model` 的事。这两件事混在一起会让「随手点个星星」
+/// 意外改变正在用的模型。
+#[tauri::command]
+pub async fn set_model_favorite(
+    config: State<'_, ConfigStore>,
+    provider_id: String,
+    model_key: String,
+    favorite: bool,
+) -> AppResult<ProvidersState> {
+    config.update(|cfg| apply_model_favorite(cfg, &provider_id, &model_key, favorite))?;
+    Ok(config.read(build_state))
+}
+
+/// 收藏变更的**纯逻辑**。
+///
+/// 单独抽出来是因为命令要 `State<'_, ConfigStore>`，在单测里构造不出来 ——
+/// 但这段「找不到就报错、找到就改一个 bool」的判断恰恰是最该被测试钉住的部分
+/// （它决定了 `providers.json` 会不会被写坏）。
+fn apply_model_favorite(
+    cfg: &mut AppConfig,
+    provider_id: &str,
+    model_key: &str,
+    favorite: bool,
+) -> AppResult<()> {
+    let provider = cfg
+        .providers
+        .iter_mut()
+        .find(|p| p.id == provider_id)
+        .ok_or_else(|| AppError::invalid("该服务商不存在"))?;
+    let model = provider
+        .models
+        .iter_mut()
+        .find(|m| m.key == model_key)
+        .ok_or_else(|| AppError::invalid("该服务商下没有这个模型"))?;
+    model.favorite = favorite;
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn set_default_model(
     config: State<'_, ConfigStore>,
@@ -258,4 +303,89 @@ pub async fn fetch_models(
         return Err(openai::map_http_error(status.as_u16(), &body));
     }
     openai::parse_models_response(&body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::errors::code;
+
+    /// 造一份「一个服务商 + 两个模型」的配置，其中一个已收藏。
+    fn cfg_with_models() -> AppConfig {
+        let mut cfg = AppConfig::seeded();
+        cfg.providers.clear();
+        let mut provider = ProviderConfig {
+            id: "p-test".to_string(),
+            name: "测试服务商".to_string(),
+            base_url: "http://127.0.0.1:9/v1".to_string(),
+            models: Vec::new(),
+            is_preset: false,
+        };
+        provider.models.push(ModelEntry {
+            key: "model-a".to_string(),
+            favorite: true,
+        });
+        provider.models.push(ModelEntry {
+            key: "model-b".to_string(),
+            favorite: false,
+        });
+        cfg.providers.push(provider);
+        cfg
+    }
+
+    fn favorite_of(cfg: &AppConfig, key: &str) -> bool {
+        cfg.providers[0]
+            .models
+            .iter()
+            .find(|m| m.key == key)
+            .map(|m| m.favorite)
+            .expect("模型应当存在")
+    }
+
+    #[test]
+    fn favoriting_and_unfavoriting_a_model() {
+        let mut cfg = cfg_with_models();
+
+        apply_model_favorite(&mut cfg, "p-test", "model-b", true).unwrap();
+        assert!(favorite_of(&cfg, "model-b"));
+
+        apply_model_favorite(&mut cfg, "p-test", "model-a", false).unwrap();
+        assert!(!favorite_of(&cfg, "model-a"));
+    }
+
+    #[test]
+    fn setting_the_same_value_twice_is_harmless() {
+        let mut cfg = cfg_with_models();
+        apply_model_favorite(&mut cfg, "p-test", "model-a", true).unwrap();
+        apply_model_favorite(&mut cfg, "p-test", "model-a", true).unwrap();
+        assert!(favorite_of(&cfg, "model-a"));
+    }
+
+    #[test]
+    fn favoriting_only_touches_that_one_model() {
+        // 星标一个模型绝不能顺手改动别的模型的状态 ——
+        // 这类「改 A 影响 B」的错误在界面上表现为「收藏莫名消失」。
+        let mut cfg = cfg_with_models();
+        apply_model_favorite(&mut cfg, "p-test", "model-b", true).unwrap();
+        assert!(favorite_of(&cfg, "model-a"), "另一个模型的收藏不该被动过");
+    }
+
+    #[test]
+    fn unknown_provider_is_rejected_without_touching_anything() {
+        let mut cfg = cfg_with_models();
+        let before = cfg.providers.len();
+        let err = apply_model_favorite(&mut cfg, "没有这个", "model-a", false).unwrap_err();
+        assert_eq!(err.code, code::INVALID_INPUT);
+        assert_eq!(cfg.providers.len(), before);
+        assert!(favorite_of(&cfg, "model-a"), "报错时不能改动已有数据");
+    }
+
+    #[test]
+    fn unknown_model_is_rejected_without_touching_anything() {
+        let mut cfg = cfg_with_models();
+        let err = apply_model_favorite(&mut cfg, "p-test", "model-z", true).unwrap_err();
+        assert_eq!(err.code, code::INVALID_INPUT);
+        assert!(favorite_of(&cfg, "model-a"));
+        assert!(!favorite_of(&cfg, "model-b"), "报错时不能改动已有数据");
+    }
 }

@@ -1,9 +1,18 @@
 import { useEffect, useRef, useState } from "react";
 
+import {
+  clampFontSize,
+  MAX_FONT_SIZE,
+  MIN_FONT_SIZE,
+  MIN_WINDOW_OPACITY,
+  opacityFromPercent,
+  opacityToPercent,
+} from "../lib/appearance";
+import { sortModels } from "../lib/models";
 import { toolLabel } from "../lib/tools";
 import { api } from "../services/api";
 import { useChat } from "../stores/chat";
-import { useConfig } from "../stores/config";
+import { applyAppearance, previewAppearance, useConfig } from "../stores/config";
 import { useProviders } from "../stores/providers";
 import { useUi } from "../stores/ui";
 
@@ -199,7 +208,7 @@ function ModelsTab() {
             {provider.models.length === 0 ? (
               <span className="settings-hint">还没有模型</span>
             ) : null}
-            {provider.models.map((model) => (
+            {sortModels(provider.models).map((model) => (
               <span
                 key={model.key}
                 className={`model-tag ${
@@ -209,6 +218,24 @@ function ModelsTab() {
                     : ""
                 }`}
               >
+                <button
+                  className={`model-tag-star${model.favorite ? " on" : ""}`}
+                  title={
+                    model.favorite
+                      ? "取消收藏"
+                      : "收藏（在输入框上方的下拉里排到前面）"
+                  }
+                  aria-pressed={model.favorite}
+                  onClick={() =>
+                    void store.setFavorite(
+                      provider.id,
+                      model.key,
+                      !model.favorite,
+                    )
+                  }
+                >
+                  {model.favorite ? "★" : "☆"}
+                </button>
                 <button
                   className="model-tag-main"
                   title="设为默认"
@@ -553,16 +580,28 @@ function DebouncedTextarea({
 }
 
 /**
- * 温度滑块：拖动时只看草稿，停手 350ms 才落盘。
+ * 通用滑块：拖动时只看草稿，停手 350ms 才落盘。
  *
  * 否则拖一次滑块会产生几十次 fsync —— 每次都要写临时文件、刷盘、改名字。
+ * （temperature、窗口不透明度、字号共用这一段。）
+ *
+ * `onPreview` 是给「改完要立刻看见」的项用的：拖动时先改 CSS 变量，
+ * 落盘仍然走 350ms 节流。
  */
-function TemperatureField({
+function RangeField({
   value,
+  min,
+  max,
+  step,
   onCommit,
+  onPreview,
 }: {
   value: number;
+  min: number;
+  max: number;
+  step: number;
   onCommit: (next: number) => void;
+  onPreview?: (next: number) => void;
 }) {
   const [draft, setDraft] = useState(value);
 
@@ -572,6 +611,8 @@ function TemperatureField({
     if (draft === value) return;
     const timer = window.setTimeout(() => onCommit(draft), 350);
     return () => window.clearTimeout(timer);
+    // onPreview 不参与依赖：它是即时生效的，不该触发提交计时器。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draft, value, onCommit]);
 
   // 拖完 350ms 内就关面板的话，把最后一次的值补交上去。
@@ -580,12 +621,28 @@ function TemperatureField({
   return (
     <input
       type="range"
-      min={0}
-      max={2}
-      step={0.1}
+      min={min}
+      max={max}
+      step={step}
       value={draft}
-      onChange={(e) => setDraft(Number(e.target.value))}
+      onChange={(e) => {
+        const next = Number(e.target.value);
+        setDraft(next);
+        onPreview?.(next);
+      }}
     />
+  );
+}
+
+function TemperatureField({
+  value,
+  onCommit,
+}: {
+  value: number;
+  onCommit: (next: number) => void;
+}) {
+  return (
+    <RangeField value={value} min={0} max={2} step={0.1} onCommit={onCommit} />
   );
 }
 
@@ -593,6 +650,19 @@ function AppearanceTab() {
   const config = useConfig((s) => s.config);
   const patch = useConfig((s) => s.patch);
   if (!config) return <div className="settings-hint">载入中…</div>;
+
+  /**
+   * 外观类设置提交失败时，把 CSS 变量退回**配置里的值**。
+   *
+   * 不退回的话界面会停在一个「看起来生效了、其实没保存」的状态 ——
+   * 下次启动又变回去，用户会认为设置不生效。
+   */
+  const commit = (next: Parameters<typeof patch>[0]) => {
+    void patch(next).catch(() => {
+      const current = useConfig.getState().config;
+      if (current) applyAppearance(current);
+    });
+  };
 
   return (
     <div className="settings-section">
@@ -608,6 +678,40 @@ function AppearanceTab() {
           <option value="light">浅色</option>
           <option value="dark">深色</option>
         </select>
+      </label>
+
+      <label className="field">
+        <span>
+          窗口不透明度（{opacityToPercent(config.windowOpacity)}%）——
+          只影响背景，文字始终清晰
+        </span>
+        <RangeField
+          value={opacityToPercent(config.windowOpacity)}
+          min={Math.round(MIN_WINDOW_OPACITY * 100)}
+          max={100}
+          step={1}
+          onPreview={(percent) =>
+            previewAppearance({ windowOpacity: opacityFromPercent(percent) })
+          }
+          onCommit={(percent) =>
+            commit({ windowOpacity: opacityFromPercent(percent) })
+          }
+        />
+      </label>
+
+      <label className="field">
+        <span>
+          正文字号（{clampFontSize(config.messageFontSize)}px）——
+          影响聊天内容与输入框
+        </span>
+        <RangeField
+          value={clampFontSize(config.messageFontSize)}
+          min={MIN_FONT_SIZE}
+          max={MAX_FONT_SIZE}
+          step={0.5}
+          onPreview={(px) => previewAppearance({ messageFontSize: px })}
+          onCommit={(px) => commit({ messageFontSize: px })}
+        />
       </label>
 
       <label className="field">

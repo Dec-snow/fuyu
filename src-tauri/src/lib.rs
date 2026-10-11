@@ -49,6 +49,8 @@ pub fn run() {
             commands::chat::chat_cancel,
             commands::chat::chat_approve_tool,
             commands::chat::test_provider,
+            // ---- 剪贴板
+            commands::clipboard::copy_to_clipboard,
             // ---- 设置
             commands::settings::app_info,
             commands::settings::get_config,
@@ -61,6 +63,7 @@ pub fn run() {
             commands::providers::add_models,
             commands::providers::remove_model,
             commands::providers::set_default_model,
+            commands::providers::set_model_favorite,
             commands::providers::set_api_key,
             commands::providers::fetch_models,
             // ---- 历史

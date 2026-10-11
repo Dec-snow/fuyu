@@ -16,6 +16,7 @@ export default function App() {
   const settingsOpen = useUi((s) => s.settingsOpen);
   const phase = useUi((s) => s.phase);
   const hideOnBlur = useConfig((s) => s.config?.hideOnBlur ?? true);
+  const configLoaded = useConfig((s) => s.loaded);
 
   // 动画阶段写到 <html> 上，CSS 只认 data-phase，不再关心 React 状态。
   useEffect(() => {
@@ -30,7 +31,14 @@ export default function App() {
   //    藏起来会让人根本没法把 Key 粘进来；
   // 3. 用户自己关掉了这个选项。
   useEffect(() => {
-    if (!hideOnBlur) return;
+    // 配置还没回来之前**不要**注册这个监听。
+    //
+    // 为什么：`config` 为 null 时上面只能按默认值取 `true`，于是「用户明明
+    // 关掉了失焦自动隐藏」在启动的头一两百毫秒里仍然生效 —— 窗口刚被
+    // `show_window` 显示出来，一次失焦就把它藏了。症状是「窗口一闪就没了」，
+    // 而且**只在启动瞬间偶发**，靠手工几乎复现不了（这个 bug 就是实测时
+    // 观察到「启动后窗口不可见」才顺出来的）。
+    if (!configLoaded || !hideOnBlur) return;
 
     let timer = 0;
     const onBlur = () => {
@@ -50,7 +58,7 @@ export default function App() {
       window.removeEventListener("blur", onBlur);
       window.removeEventListener("focus", onFocus);
     };
-  }, [hideOnBlur]);
+  }, [hideOnBlur, configLoaded]);
 
   // Esc 收起设置面板 / 悬浮窗。
   useEffect(() => {

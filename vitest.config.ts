@@ -8,6 +8,9 @@ export default defineConfig({
     // 被测试的都是纯逻辑（markdown 解析、事件去重、状态折叠），不碰 DOM，
     // 所以用 node 环境即可 —— 不需要 jsdom，测试也跑得更快。
     environment: "node",
-    include: ["src/**/*.test.ts"],
+    // `.tsx` 也要收：组件级的验证用 `react-dom/server` 的
+    // `renderToStaticMarkup` 做**服务端渲染断言**（不需要 jsdom、
+    // 也不需要 @testing-library）—— 见 `src/components/*.test.tsx`。
+    include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
   },
 });

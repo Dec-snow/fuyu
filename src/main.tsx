@@ -12,7 +12,7 @@ import {
   startEventBridge,
 } from "./services/events";
 import { bindChatEvents, useChat } from "./stores/chat";
-import { applyTheme, useConfig } from "./stores/config";
+import { applyAppearance, applyTheme, useConfig } from "./stores/config";
 import { useProviders } from "./stores/providers";
 import { useUi } from "./stores/ui";
 import "./styles/globals.css";
@@ -157,6 +157,7 @@ async function boot() {
   const expanded = config?.expanded ?? false;
   useUi.getState().setExpanded(expanded);
   applyTheme(config?.theme ?? "system");
+  applyAppearance(config);
 
   await api.setWindowMode(expanded).catch(() => undefined);
   await api.showWindow().catch(() => undefined);

@@ -1,3 +1,4 @@
+import { modelLabel, sortModels } from "../lib/models";
 import { useProviders } from "../stores/providers";
 import { useUi } from "../stores/ui";
 
@@ -7,6 +8,9 @@ import { useUi } from "../stores/ui";
  * 只改「默认服务商 + 默认模型」，改动立刻落盘：下一个会话和下次启动都用它。
  * 按会话记住模型是下一版的事（`conversations.provider_id / model_key` 字段
  * 已经留好了）。
+ *
+ * 模型下拉里**收藏的排前面**并带 `★` 前缀。原生 `<select>` 放不下星标按钮，
+ * 所以这里只做展示；真正切换收藏在「设置 → 模型」的模型标签上。
  */
 export function ModelPicker() {
   const state = useProviders((s) => s.state);
@@ -20,6 +24,8 @@ export function ModelPicker() {
   const provider =
     state.providers.find((p) => p.id === state.defaultProviderId) ??
     state.providers[0];
+
+  const models = sortModels(provider.models);
 
   return (
     <div className="model-picker">
@@ -58,9 +64,9 @@ export function ModelPicker() {
         {provider.models.length === 0 ? (
           <option value="">（无模型）</option>
         ) : null}
-        {provider.models.map((m) => (
+        {models.map((m) => (
           <option key={m.key} value={m.key}>
-            {m.key}
+            {modelLabel(m)}
           </option>
         ))}
       </select>

@@ -10,6 +10,22 @@ use serde::{Deserialize, Serialize};
 
 use crate::errors::{AppError, AppResult};
 
+/// 窗口背景不透明度的下限。
+///
+/// 为什么必须有下限：这个值最终会被前端写进 CSS 变量，而 0 的后果是
+/// **整个窗口全透明** —— 用户看不见界面，自然也点不到设置改回来，
+/// 只能手改 `providers.json`。一个滑块能让应用变得无法使用，这是设计缺陷。
+pub const MIN_WINDOW_OPACITY: f32 = 0.35;
+
+/// 正文字号范围（px）。
+///
+/// 下限 11px：再小在 125% 缩放的屏幕上读起来很吃力；
+/// 上限 18px：再大一条消息就占满整个悬浮窗，反而不好用。
+pub const MIN_FONT_SIZE: f32 = 11.0;
+pub const MAX_FONT_SIZE: f32 = 18.0;
+/// 默认正文号，和 CSS 里 `body` 原本的字号一致（改设置不该顺手改变默认外观）。
+pub const DEFAULT_FONT_SIZE: f32 = 13.5;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelEntry {
@@ -76,6 +92,23 @@ pub struct AppConfig {
     /// SearXNG 兼容的联网搜索端点（留空 = 不启用联网搜索，工具不下发给模型）。
     #[serde(default)]
     pub web_search_endpoint: Option<String>,
+    /// 悬浮窗**背景**的不透明度（[`MIN_WINDOW_OPACITY`] ~ 1.0）。
+    ///
+    /// 只影响背景，不影响文字：调低之后文字仍然完全不透明，
+    /// 否则「调透明」会变成「调得看不清」。
+    #[serde(default = "default_window_opacity")]
+    pub window_opacity: f32,
+    /// 正文字号（[`MIN_FONT_SIZE`] ~ [`MAX_FONT_SIZE`]，px）。
+    #[serde(default = "default_font_size")]
+    pub message_font_size: f32,
+}
+
+fn default_window_opacity() -> f32 {
+    1.0
+}
+
+fn default_font_size() -> f32 {
+    DEFAULT_FONT_SIZE
 }
 
 impl Default for AppConfig {
@@ -106,6 +139,8 @@ impl Default for AppConfig {
             context_budget_tokens: crate::agent::context::DEFAULT_CONTEXT_BUDGET_TOKENS as u32,
             always_allowed_tools: Vec::new(),
             web_search_endpoint: None,
+            window_opacity: default_window_opacity(),
+            message_font_size: default_font_size(),
         }
     }
 }

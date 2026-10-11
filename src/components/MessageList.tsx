@@ -5,6 +5,7 @@ import { visibleMessages } from "../lib/chat-state";
 import { toolLabel } from "../lib/tools";
 import { useChat, type PendingApproval } from "../stores/chat";
 import type { ToolTrace, UiMessage } from "../types";
+import { CopyButton } from "./CopyButton";
 import { Markdown } from "./Markdown";
 
 function toolIcon(status: ToolTrace["status"]): string {
@@ -194,18 +195,26 @@ const MessageBubble = memo(function MessageBubble({
         ) : null}
       </div>
 
-      {/* 单条删除。之前界面上完全没有入口：一条说错的话只能靠「编辑并重发」
-          或者「删掉整个会话」来处理，而 `delete_message` 命令其实早就有了。 */}
+      {/* 单条消息的悬停操作。之前界面上完全没有入口：一条说错的话只能靠
+          「编辑并重发」或者「删掉整个会话」来处理，而 `delete_message` 命令
+          其实早就有了；复制更是完全缺失 —— 用户只能手动拖选。 */}
       {!message.streaming ? (
-        <button
-          className="bubble-delete"
-          title="删除这条消息"
-          onClick={() => {
-            if (window.confirm("删除这条消息？")) onDelete(message.id);
-          }}
-        >
-          🗑
-        </button>
+        <>
+          <CopyButton
+            text={message.content}
+            className="bubble-copy"
+            title="复制这条消息"
+          />
+          <button
+            className="bubble-delete"
+            title="删除这条消息"
+            onClick={() => {
+              if (window.confirm("删除这条消息？")) onDelete(message.id);
+            }}
+          >
+            🗑
+          </button>
+        </>
       ) : null}
     </div>
   );

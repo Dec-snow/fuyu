@@ -14,6 +14,11 @@ interface ProvidersStore {
   addModels: (providerId: string, keys: string[]) => Promise<void>;
   removeModel: (providerId: string, modelKey: string) => Promise<void>;
   setDefault: (providerId: string, modelKey: string) => Promise<void>;
+  setFavorite: (
+    providerId: string,
+    modelKey: string,
+    favorite: boolean,
+  ) => Promise<void>;
   fetchModels: (providerId: string) => Promise<string[]>;
   clearError: () => void;
 }
@@ -54,6 +59,12 @@ export const useProviders = create<ProvidersStore>((set) => ({
 
   setDefault: async (providerId, modelKey) => {
     set({ state: await api.setDefaultModel(providerId, modelKey) });
+  },
+
+  // 收藏只影响展示顺序，不影响正在用的模型 —— 所以这里**不去动**
+  // defaultModelKey，只把后端返回的最新状态整体换掉。
+  setFavorite: async (providerId, modelKey, favorite) => {
+    set({ state: await api.setModelFavorite(providerId, modelKey, favorite) });
   },
 
   fetchModels: (providerId) => api.fetchModels(providerId),

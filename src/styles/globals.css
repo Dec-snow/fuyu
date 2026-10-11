@@ -4,7 +4,14 @@
    ------------------------------------------------------------------ */
 
 :root {
-  --bg: rgba(252, 252, 254, 0.92);
+  /* 窗口背景被拆成「颜色 + 透明度」两段：透明度那段乘上用户设置的
+     `--win-opacity`（设置 → 对话 → 窗口不透明度）。
+     只让**背景**变透明，文字始终不透明 —— 否则「调透明」会变成「调得看不清」。
+     `--bg-elevated`（设置面板、提示气泡）刻意不参与：不管窗口调多透明，
+     设置面板都必须清晰可见，否则用户没办法把透明度调回来。 */
+  --bg-rgb: 252 252 254;
+  --bg-alpha: 0.92;
+  --bg: rgb(var(--bg-rgb) / calc(var(--bg-alpha) * var(--win-opacity, 1)));
   --bg-elevated: rgba(255, 255, 255, 0.96);
   --fg: #1c2030;
   --fg-dim: #6b7280;
@@ -21,10 +28,14 @@
   --danger: #dc2626;
   --ok: #16a34a;
   --shadow: 0 18px 48px rgba(15, 23, 42, 0.22);
+  /* 正文字号：由设置写进根节点（src/stores/config.ts 的 applyAppearance）。
+     默认值和 body 原本的字号一致，所以「没改过设置」的外观完全不变。 */
+  --msg-font-size: 13.5px;
 }
 
 [data-theme="dark"] {
-  --bg: rgba(24, 26, 34, 0.92);
+  --bg-rgb: 24 26 34;
+  --bg-alpha: 0.92;
   --bg-elevated: rgba(32, 35, 45, 0.97);
   --fg: #e8eaf0;
   --fg-dim: #a1a7b5;
@@ -64,7 +75,11 @@ body {
   color: var(--fg);
   font-family: -apple-system, "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI",
     "Microsoft YaHei", system-ui, sans-serif;
-  font-size: 13.5px;
+  /* 正文字号跟着设置走。放在 body 上而不是给每个组件传 props：
+     气泡、输入框、列表这些「要读的文字」本来就继承 body，
+     而按钮/标签自己写了 px 字号（那是控件，不该跟着放大）。
+     这样「字号」只影响阅读，不会把整个界面撑变形。 */
+  font-size: var(--msg-font-size, 13.5px);
   line-height: 1.6;
   -webkit-font-smoothing: antialiased;
 }
@@ -369,8 +384,10 @@ textarea {
   margin-bottom: 10px;
 }
 
-/* 单条删除：默认隐形，悬停或键盘聚焦到这一行时才出现。
-   用 opacity 而不是 display —— `display: none` 的元素无法被 Tab 聚焦。 */
+/* 单条消息的悬停操作（复制 / 删除）：默认隐形，悬停或键盘聚焦到这一行时才出现。
+   用 opacity 而不是 display —— `display: none` 的元素无法被 Tab 聚焦，
+   键盘用户就没法复制了。 */
+.bubble-copy,
 .bubble-delete {
   flex: 0 0 auto;
   opacity: 0;
@@ -380,12 +397,38 @@ textarea {
   font-size: 12px;
   padding: 2px 4px;
   cursor: pointer;
+  white-space: nowrap;
   transition: opacity 120ms ease;
 }
 
+.bubble-row:hover .bubble-copy,
 .bubble-row:hover .bubble-delete,
+.bubble-copy:focus-visible,
 .bubble-delete:focus-visible {
   opacity: 1;
+}
+
+/* 点了之后的反馈必须**留住**：鼠标一旦移开，上面的悬停规则就不再生效，
+   用户会看不到「已复制」，于是又点一次、或者以为没成功。 */
+.bubble-copy.copied,
+.bubble-copy.failed,
+.md-code-copy.copied,
+.md-code-copy.failed {
+  opacity: 1;
+}
+
+.bubble-copy:hover {
+  color: var(--accent);
+}
+
+.bubble-copy.copied,
+.md-code-copy.copied {
+  color: var(--ok);
+}
+
+.bubble-copy.failed,
+.md-code-copy.failed {
+  color: var(--danger);
 }
 
 .bubble-delete:hover {
@@ -820,12 +863,52 @@ textarea {
   overflow: hidden;
 }
 
+/* 代码块头部：语言标注在左，复制按钮在右。
+   头部**始终占一行**（没有语言也给空 span）—— 否则「复制」按钮的位置会在
+   有/无语言标注的代码块之间上下跳，很难点。 */
+.md-code-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 6px 3px 9px;
+  border-bottom: 1px solid var(--border);
+}
+
 .md-code-lang {
-  padding: 3px 9px;
   font-size: 10.5px;
   color: var(--fg-faint);
-  border-bottom: 1px solid var(--border);
   text-transform: lowercase;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.md-code-copy {
+  flex: 0 0 auto;
+  opacity: 0;
+  border: none;
+  background: transparent;
+  color: var(--fg-faint);
+  font-size: 10.5px;
+  padding: 1px 6px;
+  border-radius: 5px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    opacity 120ms ease,
+    background 120ms ease,
+    color 120ms ease;
+}
+
+.md-code:hover .md-code-copy,
+.md-code-copy:focus-visible {
+  opacity: 1;
+}
+
+.md-code-copy:hover {
+  color: var(--accent);
+  background: var(--accent-soft);
 }
 
 .md-code pre {
@@ -1323,6 +1406,24 @@ textarea {
   padding: 2px 9px;
   border-radius: 0;
   font-size: 11.5px;
+}
+
+/* 收藏开关。空星用暗色（不抢注意力），实星用强调色 ——
+   这样一眼就能看出「哪些是我标过的」。 */
+.model-tag-star {
+  padding: 2px 2px 2px 7px;
+  border-radius: 0;
+  color: var(--fg-faint);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.model-tag-star:hover {
+  color: var(--accent);
+}
+
+.model-tag-star.on {
+  color: var(--accent);
 }
 
 .model-tag-remove {

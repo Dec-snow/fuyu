@@ -63,6 +63,15 @@ export interface AppConfig {
    * 所以它永远不会出现在这里。
    */
   alwaysAllowedTools: string[];
+  /**
+   * 悬浮窗**背景**的不透明度（0.35 ~ 1.0）。
+   *
+   * 只影响背景，不影响文字：调低不会让字变糊，否则「调透明」就等于
+   * 「调得看不清」。
+   */
+  windowOpacity: number;
+  /** 正文字号（px，11 ~ 18）。影响聊天内容、输入框这些「要读的文字」。 */
+  messageFontSize: number;
 }
 
 export interface Conversation {

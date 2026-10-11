@@ -5,7 +5,9 @@ use tauri::State;
 
 use crate::errors::{AppError, AppResult};
 use crate::models::config::AppInfo;
-use crate::storage::config::{AppConfig, ConfigStore};
+use crate::storage::config::{
+    AppConfig, ConfigStore, MAX_FONT_SIZE, MIN_FONT_SIZE, MIN_WINDOW_OPACITY,
+};
 use crate::storage::database::Database;
 
 #[tauri::command]
@@ -52,6 +54,30 @@ pub struct SettingsPatch {
     /// 「永久允许」过哪些工具。传整个列表（不是增量）——
     /// 界面上的操作是「撤销某一项」，整表覆写比算差集简单也更难出错。
     pub always_allowed_tools: Option<Vec<String>>,
+    /// 悬浮窗背景不透明度（会被收进 `MIN_WINDOW_OPACITY ..= 1.0`）。
+    pub window_opacity: Option<f32>,
+    /// 正文字号 px（会被收进 `MIN_FONT_SIZE ..= MAX_FONT_SIZE`）。
+    pub message_font_size: Option<f32>,
+}
+
+/// 把用户给的不透明度收进合法区间。
+///
+/// 抽成纯函数是为了能单测 —— 命令本身要 `State<'_, ConfigStore>`，构造不出来，
+/// 而这段「非法值怎么处理」恰恰是最该被钉死的：`NaN` 会让 CSS 变量失效，
+/// `0` 会让窗口彻底看不见。
+fn clamp_opacity(v: f32) -> AppResult<f32> {
+    if !v.is_finite() {
+        return Err(AppError::invalid("窗口不透明度必须是有效数字"));
+    }
+    Ok(v.clamp(MIN_WINDOW_OPACITY, 1.0))
+}
+
+/// 字号同理：非有限值必须报错，其余收进区间。
+fn clamp_font_size(v: f32) -> AppResult<f32> {
+    if !v.is_finite() {
+        return Err(AppError::invalid("字号必须是有效数字"));
+    }
+    Ok(v.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE))
 }
 
 /// 规整「永久允许」的工具名单：只收**已知**工具名，去重并排序。
@@ -153,6 +179,12 @@ pub async fn update_settings(
         if let Some(tools) = patch.always_allowed_tools {
             cfg.always_allowed_tools = sanitize_always_allowed(tools)?;
         }
+        if let Some(v) = patch.window_opacity {
+            cfg.window_opacity = clamp_opacity(v)?;
+        }
+        if let Some(v) = patch.message_font_size {
+            cfg.message_font_size = clamp_font_size(v)?;
+        }
         // 改完代理立刻重建 HTTP 客户端，否则要重启才生效。
         Ok(cfg.clone())
     })
@@ -172,6 +204,48 @@ pub fn apply_proxy(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- 窗口不透明度 / 字号：这一类「滑块型」设置必须被硬边界挡住
+    //
+    // 它们最终都会变成 CSS 变量。「不透明度 = 0」的后果不是「不好看」，而是
+    // **窗口彻底看不见**：用户找不到设置面板，只能手改配置文件才能恢复。
+
+    #[test]
+    fn zero_opacity_is_clamped_up_to_the_floor() {
+        assert_eq!(clamp_opacity(0.0).unwrap(), MIN_WINDOW_OPACITY);
+        assert_eq!(clamp_opacity(-3.0).unwrap(), MIN_WINDOW_OPACITY);
+    }
+
+    #[test]
+    fn opacity_above_one_is_clamped_down() {
+        assert_eq!(clamp_opacity(1.8).unwrap(), 1.0);
+        assert_eq!(clamp_opacity(1.0).unwrap(), 1.0);
+    }
+
+    #[test]
+    fn a_sane_opacity_passes_through_unchanged() {
+        assert_eq!(clamp_opacity(0.8).unwrap(), 0.8);
+        assert_eq!(
+            clamp_opacity(MIN_WINDOW_OPACITY).unwrap(),
+            MIN_WINDOW_OPACITY
+        );
+    }
+
+    #[test]
+    fn a_non_finite_opacity_is_rejected_instead_of_silently_becoming_nan() {
+        // NaN 写进 CSS 变量会让整条声明失效（背景退回浏览器默认），
+        // 而且从界面上完全看不出发生了什么 —— 必须报错。
+        assert!(clamp_opacity(f32::NAN).is_err());
+        assert!(clamp_opacity(f32::INFINITY).is_err());
+        assert!(clamp_font_size(f32::NAN).is_err());
+    }
+
+    #[test]
+    fn font_size_is_clamped_into_range() {
+        assert_eq!(clamp_font_size(2.0).unwrap(), MIN_FONT_SIZE);
+        assert_eq!(clamp_font_size(99.0).unwrap(), MAX_FONT_SIZE);
+        assert_eq!(clamp_font_size(15.0).unwrap(), 15.0);
+    }
 
     #[test]
     fn a_known_tool_can_be_remembered_forever() {

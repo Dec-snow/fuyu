@@ -36,6 +36,10 @@ export interface SettingsPatch {
   contextBudgetTokens?: number;
   /** 整表覆写「永久允许」的工具名（撤销某一项时传剩下的那些）。 */
   alwaysAllowedTools?: string[];
+  /** 窗口背景不透明度；后端会收进合法区间（见 storage/config.rs）。 */
+  windowOpacity?: number;
+  /** 正文字号 px；后端会收进合法区间。 */
+  messageFontSize?: number;
 }
 
 export interface UpsertProviderPayload {
@@ -66,6 +70,12 @@ export const api = {
     invoke<ProvidersState>("remove_model", { providerId, modelKey }),
   setDefaultModel: (providerId: string, modelKey: string) =>
     invoke<ProvidersState>("set_default_model", { providerId, modelKey }),
+  setModelFavorite: (providerId: string, modelKey: string, favorite: boolean) =>
+    invoke<ProvidersState>("set_model_favorite", {
+      providerId,
+      modelKey,
+      favorite,
+    }),
   setApiKey: (providerId: string, apiKey: string) =>
     invoke<ProvidersState>("set_api_key", { providerId, apiKey }),
   fetchModels: (providerId: string) =>
@@ -104,6 +114,13 @@ export const api = {
       approved,
       remember,
     }),
+
+  // ---- 剪贴板
+  //
+  // 走 Rust 而不是 `navigator.clipboard`：后者的失败模式在悬浮窗里不可靠
+  // （见 `src-tauri/src/commands/clipboard.rs` 的注释）。
+  copyToClipboard: (text: string) =>
+    invoke<void>("copy_to_clipboard", { text }),
 
   // ---- 历史
   listConversations: (limit?: number) =>

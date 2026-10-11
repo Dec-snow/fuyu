@@ -1,6 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { visibleMessages } from "../lib/chat-state";
+import {
+  buildMessage,
+  canAddAttachment,
+  decodeText,
+  looksBinary,
+  MAX_ATTACHMENTS,
+  type Attachment,
+} from "../lib/attachments";
 import { useChat } from "../stores/chat";
 import { useUi } from "../stores/ui";
 import { ModelPicker } from "./ModelPicker";
@@ -38,6 +46,8 @@ export function Composer() {
   const [text, setText] = useState("");
   /** 待发送的图片（data URL）。 */
   const [attachments, setAttachments] = useState<string[]>([]);
+  /** 待发送的文本类文件（内容已经读成字符串）。 */
+  const [files, setFiles] = useState<Attachment[]>([]);
   const [dragging, setDragging] = useState(false);
   const areaRef = useRef<HTMLTextAreaElement>(null);
   const send = useChat((s) => s.send);
@@ -97,6 +107,12 @@ export function Composer() {
    */
   const addFiles = async (files: File[]) => {
     const images = files.filter((file) => file.type.startsWith("image/"));
+    const docs = files.filter((file) => !file.type.startsWith("image/"));
+
+    // 文本类文件走另一条路：要读字节、验是不是真的文本、还要卡大小。
+    // 放在图片前面处理，这样「有图有文」的一次拖入两样都不丢。
+    if (docs.length > 0) await addTextFiles(docs);
+
     if (images.length === 0) return;
 
     // 后端只收这几种位图。在这里就挡掉：否则用户看到预览一切正常，
@@ -126,11 +142,53 @@ export function Composer() {
     }
   };
 
+  /**
+   * 收下文本类文件（.txt / .md / 代码 / 配置…）。
+   *
+   * 逐个文件**独立**判断与拒绝，而不是「有一个不合格就整批放弃」：
+   * 用户一次拖进来五个文件，其中有 .exe 也有 .md 是常事，
+   * 全丢掉会让人以为「这个功能坏了」。
+   *
+   * 校验分三层，缺一不可（详见 `src/lib/attachments.ts`）：
+   * 扩展名白名单 → 字节像不像二进制 → 是不是合法 UTF-8。
+   */
+  const addTextFiles = async (picked: File[]) => {
+    const accepted: Attachment[] = [];
+    for (const file of picked) {
+      const check = canAddAttachment([...files, ...accepted], file.name, file.size);
+      if (!check.ok) {
+        useUi.getState().pushNotice(`「${file.name}」已跳过：${check.reason}`);
+        continue;
+      }
+
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      if (looksBinary(bytes)) {
+        // 扩展名可以改，字节不会骗人。
+        useUi
+          .getState()
+          .pushNotice(`「${file.name}」看起来不是文本文件，已跳过`);
+        continue;
+      }
+      const decoded = decodeText(bytes);
+      if (decoded === null) {
+        useUi
+          .getState()
+          .pushNotice(`「${file.name}」不是 UTF-8 文本，已跳过（可先转成 UTF-8）`);
+        continue;
+      }
+      accepted.push({ name: file.name, text: decoded, bytes: bytes.length });
+    }
+
+    if (accepted.length > 0) setFiles((prev) => [...prev, ...accepted]);
+  };
+
   const submit = async () => {
     if (busy) return;
-    if (!text.trim() && attachments.length === 0) return;
+    if (!text.trim() && attachments.length === 0 && files.length === 0) return;
 
-    const value = text;
+    // 附件（文本文件）拼进正文：这样它天然进入历史、也会被持久化，
+    // 不需要给数据库加字段。
+    const value = buildMessage(text, files);
     const images = attachments;
     // **确认发出去了才清空草稿。**
     //
@@ -141,6 +199,7 @@ export function Composer() {
     if (accepted) {
       setText("");
       setAttachments([]);
+      setFiles([]);
     }
   };
 
@@ -162,7 +221,7 @@ export function Composer() {
   };
 
   const lastIsAssistant = messages[messages.length - 1]?.role === "assistant";
-  const canSend = text.trim().length > 0 || attachments.length > 0;
+  const canSend = text.trim().length > 0 || attachments.length > 0 || files.length > 0;
 
   return (
     <div
@@ -182,7 +241,23 @@ export function Composer() {
       <div className="composer-toolbar">
         <ModelPicker />
         <RolePicker />
-        <button
+        {files.length < MAX_ATTACHMENTS ? (
+          <label className="ghost-button file-pick" title="附加文本 / 代码 / 配置文件（也可直接拖进来）">
+            📄 文件
+            <input
+              type="file"
+              multiple
+              // 不设 `accept`：设了就选不到「被误命名的文本文件」，
+              // 而那正是我们要用字节判断、并给出明确提示的情况。
+              onChange={(e) => {
+                const picked = Array.from(e.target.files ?? []);
+                if (picked.length > 0) void addFiles(picked);
+                // 清掉 value，否则再选同一个文件不会触发 change
+                e.target.value = "";
+              }}
+            />
+          </label>
+        ) : null}        <button
           className={`tools-toggle ${toolsEnabled ? "on" : ""}`}
           title={
             toolsEnabled
@@ -199,6 +274,28 @@ export function Composer() {
           </button>
         ) : null}
       </div>
+
+      {files.length > 0 ? (
+        <div className="attachment-row">
+          {files.map((file, index) => (
+            <div className="file-chip" key={`${file.name}-${index}`}>
+              <span className="file-chip-name" title={`${file.name}（${file.bytes} 字节）`}>
+                📄 {file.name}
+              </span>
+              <span className="file-chip-size">
+                {(file.bytes / 1024).toFixed(file.bytes < 10240 ? 1 : 0)} KB
+              </span>
+              <button
+                className="attachment-remove"
+                title="移除"
+                onClick={() => setFiles((prev) => prev.filter((_, i) => i !== index))}
+              >
+                ×
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : null}
 
       {attachments.length > 0 ? (
         <div className="attachment-row">
@@ -227,7 +324,9 @@ export function Composer() {
           placeholder={
             attachments.length > 0
               ? "给这张图配个问题…（可直接回车发送）"
-              : "问点什么…（Enter 发送，Shift+Enter 换行，可粘贴图片）"
+              : files.length > 0
+                ? "针对这些文件问点什么…（可直接回车发送）"
+                : "问点什么…（Enter 发送，Shift+Enter 换行，可粘贴图片或拖入文件）"
           }
           onChange={(e) => setText(e.target.value)}
           onKeyDown={onKeyDown}
@@ -248,7 +347,7 @@ export function Composer() {
         )}
       </div>
 
-      {dragging ? <div className="drop-hint">松手即可添加图片</div> : null}
+      {dragging ? <div className="drop-hint">松手即可添加图片或文本文件</div> : null}
     </div>
   );
 }

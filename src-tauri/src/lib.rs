@@ -73,6 +73,8 @@ pub fn run() {
             commands::autostart::set_autostart,
             commands::autostart::autostart_status,
             commands::autostart::started_minimized,
+            // ---- 用量与费用
+            commands::usage::usage_report,
             // ---- 设置
             commands::settings::app_info,
             commands::settings::get_config,

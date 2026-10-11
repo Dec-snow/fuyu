@@ -12,12 +12,20 @@ import { sortModels } from "../lib/models";
 import { blankRole } from "../lib/roles";
 import { formatDiagnostics, hasProblems } from "../lib/diagnostics";
 import { toolLabel } from "../lib/tools";
+import {
+  barWidth,
+  formatCost,
+  formatTokens,
+  maxDayTokens,
+  shortDay,
+  totalTokens,
+} from "../lib/usage";
 import { api } from "../services/api";
 import { useChat } from "../stores/chat";
 import { applyAppearance, previewAppearance, useConfig } from "../stores/config";
 import { useProviders } from "../stores/providers";
 import { useUi } from "../stores/ui";
-import type { Diagnostics, RolePreset } from "../types";
+import type { Diagnostics, RolePreset, UsageReport } from "../types";
 import { CopyButton } from "./CopyButton";
 
 type Tab = "models" | "appearance" | "general" | "data" | "about";
@@ -1102,6 +1110,94 @@ function formatBytes(bytes: number): string {
  * 为什么不做「另存为」对话框：那需要 `tauri-plugin-dialog` 与相应的权限声明。
  * 先把「备份真的能存下来」做扎实，对话框是下一步。
  */
+/**
+ * 用量与费用估算。
+ *
+ * 两条「宁可说不知道」的规则，都体现在界面上：
+ * - 价格表里认不出来的模型**不猜价**，而是列出来并标明「未计入」——
+ *   悄悄按 0 算会给出一个看起来很确定的错数字，那比不给数字更糟；
+ * - 费用一律标注「估算，仅供参考」：价格表是内置的、会过时。
+ */
+function UsagePanel() {
+  const [report, setReport] = useState<UsageReport | null>(null);
+  const [days, setDays] = useState(14);
+  const pushNotice = useUi((s) => s.pushNotice);
+
+  useEffect(() => {
+    void api
+      .usageReport(days)
+      .then(setReport)
+      .catch((e) => pushNotice(`读取用量失败：${e}`));
+  }, [days, pushNotice]);
+
+  const max = report ? maxDayTokens(report.days) : 0;
+
+  return (
+    <div className="field">
+      <span>用量与费用</span>
+      <div className="danger-row">
+        <select
+          value={days}
+          onChange={(e) => setDays(Number(e.target.value))}
+          className="usage-range"
+        >
+          <option value={7}>最近 7 天</option>
+          <option value={14}>最近 14 天</option>
+          <option value={30}>最近 30 天</option>
+          <option value={90}>最近 90 天</option>
+        </select>
+      </div>
+
+      {report ? (
+        report.days.length === 0 ? (
+          <div className="settings-hint">
+            这段时间还没有用量（只有真正报过 token 的回答才计入）。
+          </div>
+        ) : (
+          <>
+            <div className="settings-hint">
+              合计 {formatTokens(report.totalInputTokens + report.totalOutputTokens)} token
+              （输入 {formatTokens(report.totalInputTokens)} / 输出{" "}
+              {formatTokens(report.totalOutputTokens)}），{report.totalMessages} 次回答
+              {report.totalMessages > 0 ? "。" : "。"}
+              估算花费 <b>{formatCost(report.estimatedCost)}</b>
+              {report.unpricedModels.length > 0 ? "（不含下面未计价的模型）" : ""}
+              。
+            </div>
+
+            <div className="usage-bars">
+              {report.days.map((d) => (
+                <div className="usage-bar-row" key={d.day} title={
+                  `${d.day}\n输入 ${formatTokens(d.inputTokens)} / 输出 ${formatTokens(d.outputTokens)}\n` +
+                  `${d.hasUnpriced ? "含未计价模型，" : ""}估算 ${formatCost(d.cost)}`
+                }>
+                  <span className="usage-day">{shortDay(d.day)}</span>
+                  <div className="usage-bar">
+                    <div
+                      className="usage-bar-in"
+                      style={{ width: barWidth(totalTokens(d), max) }}
+                    />
+                  </div>
+                  <span className="usage-num">{formatTokens(totalTokens(d))}</span>
+                </div>
+              ))}
+            </div>
+
+            <div className="settings-hint">
+              按内置价格表估算，价格会变，**仅供参考**。
+              {report.unpricedModels.length > 0
+                ? `以下模型不在价格表里、未计入费用：${report.unpricedModels.join("、")}。`
+                : ""}
+            </div>
+          </>
+        )
+      ) : (
+        <div className="settings-hint">读取中…</div>
+      )}
+    </div>
+  );
+}
+
 function DataTab() {
   const refreshConversations = useChat((s) => s.refreshConversations);
   const startNewConversation = useChat((s) => s.newConversation);
@@ -1157,6 +1253,8 @@ function DataTab() {
 
   return (
     <div className="settings-section">
+      <UsagePanel />
+
       <div className="field">
         <span>导出全部历史（含图片，JSON 格式）</span>
         <button className="ghost-button" disabled={busy} onClick={() => void onExport()}>

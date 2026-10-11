@@ -457,6 +457,52 @@ impl Database {
         })
     }
 
+    /// 按「天 + 服务商 + 模型」聚合 token 用量，供费用估算与趋势图使用。
+    ///
+    /// 只统计**真的报过 usage 的助手消息**（两个 token 字段加起来大于 0）：
+    /// - 用户消息没有 token，混进来会造出一堆「模型名为空」的行，
+    ///   然后被费用估算当成「认不出来的模型」列出来 —— 那是纯噪音；
+    /// - 被取消 / 失败的轮次通常没有 usage，它们也不该算钱。
+    ///
+    /// 日期按**本地时间**分组：用户看的是「我昨天花了多少」，不是 UTC 的昨天。
+    pub fn usage_by_day_model(
+        &self,
+        since_ms: i64,
+    ) -> AppResult<Vec<crate::models::pricing::UsageRow>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT date(created_at / 1000, 'unixepoch', 'localtime') AS day,
+                        COALESCE(provider_id, '') AS provider_id,
+                        COALESCE(model_key, '') AS model_key,
+                        SUM(COALESCE(input_tokens, 0)) AS input_tokens,
+                        SUM(COALESCE(output_tokens, 0)) AS output_tokens,
+                        COUNT(*) AS messages
+                   FROM messages
+                  WHERE role = 'assistant'
+                    AND created_at >= ?1
+                    AND (COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)) > 0
+                  GROUP BY day, provider_id, model_key
+                  ORDER BY day ASC",
+            )?;
+            let rows = stmt.query_map([since_ms], |row| {
+                Ok(crate::models::pricing::UsageRow {
+                    day: row.get(0)?,
+                    provider_id: row.get(1)?,
+                    model_key: row.get(2)?,
+                    input_tokens: row.get(3)?,
+                    output_tokens: row.get(4)?,
+                    messages: row.get(5)?,
+                })
+            })?;
+
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r?);
+            }
+            Ok(out)
+        })
+    }
+
     /// 导出全部会话与消息（**含图片**）。
     ///
     /// 图片原样带走：备份悄悄丢掉一部分数据比文件大更糟 ——
@@ -1202,6 +1248,104 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&dir2).ok();
+    }
+
+    #[test]
+    fn usage_aggregation_counts_only_assistant_messages_that_reported_tokens() {
+        let (db, dir) = temp_db();
+        let now = now_ms();
+        let conv = db
+            .create_conversation("deepseek", "deepseek-chat", None)
+            .unwrap();
+
+        // 用户消息：没有 token —— 混进用量会造出「模型名为空」的行，
+        // 然后被费用估算列成「认不出来的模型」，纯噪音。
+        db.insert_message(&conv.id, "user", "问", &[], None, None, None, None, None)
+            .unwrap();
+        // 助手消息，报过 usage：要算
+        db.insert_message(
+            &conv.id,
+            "assistant",
+            "答",
+            &[],
+            None,
+            Some("deepseek"),
+            Some("deepseek-chat"),
+            Some(1000),
+            Some(500),
+        )
+        .unwrap();
+        // 助手消息但完全没有 usage（被取消 / 失败）：不算钱
+        db.insert_message(
+            &conv.id,
+            "assistant",
+            "（被取消）",
+            &[],
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let rows = db.usage_by_day_model(now - 86_400_000).unwrap();
+        assert_eq!(rows.len(), 1, "只该有一行（那天 + 那个模型）：{rows:?}");
+        assert_eq!(rows[0].input_tokens, 1000);
+        assert_eq!(rows[0].output_tokens, 500);
+        assert_eq!(rows[0].messages, 1, "只数真的报了 usage 的那一条");
+        assert_eq!(rows[0].model_key, "deepseek-chat");
+        // 日期要按本地时间分好组，不能是空串
+        assert_eq!(
+            rows[0].day.len(),
+            10,
+            "期望 YYYY-MM-DD，实际 {}",
+            rows[0].day
+        );
+
+        // 时间窗口之外不参与统计。
+        //
+        // 用「一分钟后」而不是「一毫秒后」：消息的 `created_at` 是插入那一刻的
+        // 时间戳，几次插入本身就要花几毫秒 —— 取 `now + 1` 会把刚插进去的消息
+        // 也算进窗口里，测试自己把自己坑了（第一次就是这么挂的）。
+        assert!(
+            db.usage_by_day_model(now + 60_000).unwrap().is_empty(),
+            "since 在未来就不该有任何行"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn usage_aggregation_separates_models_and_sums_the_same_day() {
+        // 同一天的两个模型必须是两行（价格不同，不能先合并再计价）。
+        let (db, dir) = temp_db();
+        let now = now_ms();
+        let conv = db.create_conversation("p", "m", None).unwrap();
+        for (model, input) in [("deepseek-chat", 1000_i64), ("gpt-4o", 2000)] {
+            db.insert_message(
+                &conv.id,
+                "assistant",
+                "答",
+                &[],
+                None,
+                Some("p"),
+                Some(model),
+                Some(input),
+                Some(100),
+            )
+            .unwrap();
+        }
+        let rows = db.usage_by_day_model(now - 86_400_000).unwrap();
+        assert_eq!(rows.len(), 2, "不同模型要分开：{rows:?}");
+        let chat = rows
+            .iter()
+            .find(|r| r.model_key == "deepseek-chat")
+            .unwrap();
+        let gpt = rows.iter().find(|r| r.model_key == "gpt-4o").unwrap();
+        assert_eq!(chat.input_tokens, 1000);
+        assert_eq!(gpt.input_tokens, 2000);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

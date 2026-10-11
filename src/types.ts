@@ -136,6 +136,33 @@ export interface Diagnostics {
   logs: LogEntry[];
 }
 
+/** 一天的用量汇总（画趋势图用）。 */
+export interface UsageDay {
+  /** `YYYY-MM-DD`（本地时间）。 */
+  day: string;
+  inputTokens: number;
+  outputTokens: number;
+  messages: number;
+  /** 这一天里**有价格**的模型的花费合计（元）。 */
+  cost: number;
+  /**
+   * 这一天是否含有「价格表里没有」的模型。
+   * 有的话 `cost` 是**偏低的** —— 界面必须说明，不能把偏低的数字当成全部。
+   */
+  hasUnpriced: boolean;
+}
+
+export interface UsageReport {
+  days: UsageDay[];
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalMessages: number;
+  estimatedCost: number;
+  /** 价格表里认不出来的模型。 */
+  unpricedModels: string[];
+  pricedModels: number;
+}
+
 export interface StoredMessage {
   id: string;
   conversationId: string;

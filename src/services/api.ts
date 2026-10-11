@@ -14,6 +14,7 @@ import type {
   ProvidersState,
   RolePreset,
   StoredMessage,
+  UsageReport,
 } from "../types";
 
 export interface ConversationDetail {
@@ -161,6 +162,12 @@ export const api = {
   autostartStatus: () => invoke<boolean>("autostart_status"),
   /** 这一次是不是「开机自启带 --minimized」启动的。 */
   startedMinimized: () => invoke<boolean>("started_minimized"),
+
+  // ---- 用量与费用
+  //
+  // 估算在 Rust 侧做（内置价格表 + 认不出来就如实列进 unpricedModels）。
+  usageReport: (days?: number) =>
+    invoke<UsageReport>("usage_report", { days: days ?? null }),
 
   // ---- 历史
   listConversations: (limit?: number) =>

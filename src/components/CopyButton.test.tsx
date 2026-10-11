@@ -49,13 +49,50 @@ describe("CopyButton", () => {
 });
 
 describe("Markdown 的代码块复制", () => {
+  /**
+   * 取渲染结果的**纯文本**。
+   *
+   * 不能直接断言 HTML 里包含原文了：代码高亮会把 `const a = 1;` 切成好几个
+   * `<span>`，而 SSR 还会在相邻文本节点之间插入 `<!-- -->` 分隔注释 ——
+   * 原文在 DOM 里完整保留，但不再是 HTML 里的一段连续子串。
+   */
+  const plainText = (html: string) =>
+    html.replace(/<!--\s*-->/g, "").replace(/<[^>]*>/g, "");
+
   it("代码块有复制按钮，且语言标注可见", () => {
     const text = ["说明文字", "", "```js", "const a = 1;", "```"].join(NEWLINE);
     const html = renderToStaticMarkup(<Markdown text={text} />);
 
-    expect(html).toContain("const a = 1;");
+    // 高亮**不丢字符**：纯文本里必须仍有完整源码
+    expect(plainText(html)).toContain("const a = 1;");
     expect(html).toContain("复制代码");
     expect(html).toContain(">js<");
+  });
+
+  it("有语言的代码块会被高亮（带上 hljs 类），没语言的不高亮", () => {
+    const withLang = renderToStaticMarkup(
+      <Markdown text={["```rust", "fn main() {}", "```"].join(NEWLINE)} />,
+    );
+    expect(withLang).toContain("hljs-keyword");
+    expect(plainText(withLang)).toContain("fn main() {}");
+
+    const withoutLang = renderToStaticMarkup(
+      <Markdown text={["```", "fn main() {}", "```"].join(NEWLINE)} />,
+    );
+    expect(withoutLang).not.toContain("hljs-keyword");
+  });
+
+  it("公式渲染成 KaTeX 结构，且不出现脚本/事件处理器", () => {
+    const html = renderToStaticMarkup(<Markdown text="质能方程 $E = mc^2$" />);
+    expect(html).toContain("katex");
+    expect(html).not.toContain("<script");
+    expect(html).not.toContain("onerror=");
+  });
+
+  it("公式写错时退回源码，而不是留一片空白", () => {
+    // 这条守的是「降级可见」：宁可让用户看到 $\\bad$，也不能什么都没有。
+    const html = renderToStaticMarkup(<Markdown text={"$" + "x".repeat(6000) + "$"} />);
+    expect(plainText(html)).toContain("x".repeat(20));
   });
 
   it("两个代码块 => 两个复制按钮", () => {

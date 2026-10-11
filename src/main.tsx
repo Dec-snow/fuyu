@@ -15,6 +15,9 @@ import { bindChatEvents, useChat } from "./stores/chat";
 import { applyAppearance, applyTheme, useConfig } from "./stores/config";
 import { useProviders } from "./stores/providers";
 import { useUi } from "./stores/ui";
+// KaTeX 的样式表与字体（woff2 会被 Vite 一起打包，走 `font-src 'self'`）。
+// 放在这里而不是组件里：公式的字体是全局资源，只该加载一次。
+import "katex/dist/katex.min.css";
 import "./styles/globals.css";
 
 /**

@@ -16,6 +16,7 @@ use rusqlite::{Connection, OptionalExtension};
 
 use crate::errors::{AppError, AppResult};
 use crate::models::chat::{Conversation, MessageHit, MessageStatus, MessageText, StoredMessage};
+use crate::storage::backup::{Backup, BackupConversation, BackupMessage, ImportReport};
 use crate::storage::{new_id, now_ms};
 
 /// 一步迁移。
@@ -437,6 +438,152 @@ impl Database {
             tx.execute("DELETE FROM conversations", [])?;
             tx.commit()?;
             Ok(())
+        })
+    }
+
+    /// 导出全部会话与消息（**含图片**）。
+    ///
+    /// 图片原样带走：备份悄悄丢掉一部分数据比文件大更糟 ——
+    /// 用户要的是「换台机器还能接着用」，而不是「一份看起来完整的残缺副本」。
+    /// 代价是带大量图片时文件会很大，这一点在界面上会如实告诉用户。
+    ///
+    /// 这里**不走** `list_messages`：那个为了省内存只给最近若干条消息加载图片
+    /// （见 `IMAGE_HISTORY_LIMIT`），导出的必须是全部。
+    pub fn export_backup(&self) -> AppResult<Backup> {
+        let conversations = self.list_conversations(i64::MAX)?;
+        self.with_conn(|conn| {
+            let mut out = Vec::with_capacity(conversations.len());
+            let mut stmt = conn.prepare(
+                "SELECT id, role, content, reasoning, status, error_json,
+                        input_tokens, output_tokens, images_json, created_at
+                   FROM messages
+                  WHERE conversation_id = ?1
+                  ORDER BY created_at ASC, rowid ASC",
+            )?;
+
+            for conv in conversations {
+                let rows = stmt.query_map([&conv.id], |row| {
+                    Ok(BackupMessage {
+                        id: row.get(0)?,
+                        role: row.get(1)?,
+                        content: row.get(2)?,
+                        reasoning: row.get(3)?,
+                        status: row.get(4)?,
+                        error_json: row.get(5)?,
+                        input_tokens: row.get(6)?,
+                        output_tokens: row.get(7)?,
+                        images_json: row.get(8)?,
+                        created_at: row.get(9)?,
+                    })
+                })?;
+
+                let mut messages = Vec::new();
+                for m in rows {
+                    messages.push(m?);
+                }
+
+                out.push(BackupConversation {
+                    id: conv.id,
+                    title: conv.title,
+                    provider_id: conv.provider_id,
+                    model_key: conv.model_key,
+                    role_id: conv.role_id,
+                    pinned: conv.pinned,
+                    created_at: conv.created_at,
+                    updated_at: conv.updated_at,
+                    summary: conv.summary,
+                    messages,
+                });
+            }
+
+            Ok(Backup {
+                app: crate::storage::backup::BACKUP_APP.to_string(),
+                version: crate::storage::backup::BACKUP_VERSION,
+                exported_at: now_ms(),
+                conversations: out,
+            })
+        })
+    }
+
+    /// 导入备份。**只新增，绝不覆盖**：id 已存在的会话整个跳过。
+    ///
+    /// 为什么不提供「合并 / 覆盖」：导入最常见的场景是「换机器 / 重装后恢复」，
+    /// 那时候用户手上的库是空的；而在非空库上覆盖，一次手滑就能毁掉正在用的历史。
+    /// 想真的重置，用户有「清空全部数据」这个显式入口。
+    ///
+    /// 整份导入在一个事务里：中途失败就一条都不落，不会留下半份数据让用户
+    /// 反复重试还越导越乱。
+    pub fn import_backup(&self, backup: &Backup) -> AppResult<ImportReport> {
+        self.with_conn(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            let mut report = ImportReport::default();
+
+            for conv in &backup.conversations {
+                let exists: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM conversations WHERE id = ?1",
+                    [&conv.id],
+                    |row| row.get(0),
+                )?;
+                if exists > 0 {
+                    report.skipped += 1;
+                    continue;
+                }
+
+                // 标题为空会让会话在列表里变成一个看不见名字的条目 —— 补一个默认值。
+                let title = if conv.title.trim().is_empty() {
+                    DEFAULT_CONVERSATION_TITLE
+                } else {
+                    conv.title.as_str()
+                };
+
+                tx.execute(
+                    "INSERT INTO conversations
+                       (id, title, provider_id, model_key, role_id, pinned,
+                        created_at, updated_at, summary)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    rusqlite::params![
+                        conv.id,
+                        title,
+                        conv.provider_id,
+                        conv.model_key,
+                        conv.role_id,
+                        conv.pinned as i64,
+                        conv.created_at,
+                        conv.updated_at,
+                        conv.summary
+                    ],
+                )?;
+
+                for m in &conv.messages {
+                    tx.execute(
+                        "INSERT INTO messages
+                           (id, conversation_id, role, content, images_json, reasoning,
+                            provider_id, model_key, input_tokens, output_tokens,
+                            status, error_json, created_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                        rusqlite::params![
+                            m.id,
+                            conv.id,
+                            m.role,
+                            m.content,
+                            m.images_json,
+                            m.reasoning,
+                            conv.provider_id,
+                            conv.model_key,
+                            m.input_tokens,
+                            m.output_tokens,
+                            m.status,
+                            m.error_json,
+                            m.created_at
+                        ],
+                    )?;
+                    report.messages += 1;
+                }
+                report.imported += 1;
+            }
+
+            tx.commit()?;
+            Ok(report)
         })
     }
 
@@ -972,6 +1119,98 @@ mod tests {
             .unwrap();
         let after = db.get_conversation(&conv.id).unwrap().unwrap().updated_at;
         assert_eq!(before, after, "换人设不该改 updated_at");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_backup_round_trips_through_export_and_import() {
+        let (db, dir) = temp_db();
+        let conv = db
+            .create_conversation("deepseek", "deepseek-chat", Some("备份测试"))
+            .unwrap();
+        db.set_conversation_role(&conv.id, Some("builtin-coder"))
+            .unwrap();
+        db.insert_message(&conv.id, "user", "问题", &[], None, None, None, None, None)
+            .unwrap();
+        db.insert_message(
+            &conv.id,
+            "assistant",
+            "回答",
+            &[],
+            Some("思路"),
+            None,
+            None,
+            Some(3),
+            Some(4),
+        )
+        .unwrap();
+
+        let backup = db.export_backup().unwrap();
+        assert_eq!(backup.conversations.len(), 1);
+        assert_eq!(backup.conversations[0].messages.len(), 2);
+        assert_eq!(
+            backup.conversations[0].role_id.as_deref(),
+            Some("builtin-coder")
+        );
+        assert_eq!(backup.app, crate::storage::backup::BACKUP_APP);
+
+        // ① 同一个库再导入一次：全部按 id 跳过，绝不产生重复
+        let again = db.import_backup(&backup).unwrap();
+        assert_eq!(again.imported, 0);
+        assert_eq!(again.skipped, 1);
+        assert_eq!(db.list_messages(&conv.id).unwrap().len(), 2, "不能导重");
+
+        // ② 导进一个空库（换机器 / 重装后的真实路径）：完整还原
+        let (fresh, dir2) = temp_db();
+        let report = fresh.import_backup(&backup).unwrap();
+        assert_eq!(report.imported, 1);
+        assert_eq!(report.messages, 2);
+
+        let restored = fresh.get_conversation(&conv.id).unwrap().unwrap();
+        assert_eq!(restored.title, "备份测试");
+        assert_eq!(restored.role_id.as_deref(), Some("builtin-coder"));
+
+        let messages = fresh.list_messages(&conv.id).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].content, "回答");
+        assert_eq!(messages[1].reasoning.as_deref(), Some("思路"));
+        assert_eq!(messages[1].output_tokens, Some(4));
+
+        // ③ 全文索引要跟着恢复的数据一起工作（触发器必须对导入生效，
+        //    否则「恢复了但搜不到」—— 那比没恢复更让人困惑）
+        assert_eq!(
+            fresh.search_messages("回答", 10).unwrap().len(),
+            1,
+            "导入的消息要能被搜到"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&dir2).ok();
+    }
+
+    #[test]
+    fn importing_a_conversation_without_a_title_gets_a_default_one() {
+        // 手改过的备份文件可能没有标题；空标题会让会话在列表里变成一个
+        // 看不见名字的条目。
+        let (db, dir) = temp_db();
+        let mut backup = db.export_backup().unwrap();
+        backup.conversations.push(BackupConversation {
+            id: "conv_imported".to_string(),
+            title: "   ".to_string(),
+            provider_id: "p".to_string(),
+            model_key: "m".to_string(),
+            role_id: None,
+            pinned: false,
+            created_at: 1,
+            updated_at: 2,
+            summary: String::new(),
+            messages: vec![],
+        });
+        db.import_backup(&backup).unwrap();
+        assert_eq!(
+            db.get_conversation("conv_imported").unwrap().unwrap().title,
+            DEFAULT_CONVERSATION_TITLE
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

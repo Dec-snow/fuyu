@@ -1,3 +1,4 @@
+pub mod backup;
 pub mod chat;
 pub mod clipboard;
 pub mod history;

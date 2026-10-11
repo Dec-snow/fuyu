@@ -17,13 +17,15 @@ import { applyAppearance, previewAppearance, useConfig } from "../stores/config"
 import { useProviders } from "../stores/providers";
 import { useUi } from "../stores/ui";
 import type { RolePreset } from "../types";
+import { CopyButton } from "./CopyButton";
 
-type Tab = "models" | "appearance" | "general" | "about";
+type Tab = "models" | "appearance" | "general" | "data" | "about";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "models", label: "模型" },
   { id: "appearance", label: "对话" },
   { id: "general", label: "通用" },
+  { id: "data", label: "数据" },
   { id: "about", label: "关于" },
 ];
 
@@ -55,6 +57,7 @@ export function SettingsPanel() {
           {tab === "models" ? <ModelsTab /> : null}
           {tab === "appearance" ? <AppearanceTab /> : null}
           {tab === "general" ? <GeneralTab /> : null}
+          {tab === "data" ? <DataTab /> : null}
           {tab === "about" ? <AboutTab /> : null}
         </div>
       </div>
@@ -864,8 +867,6 @@ function GeneralTab() {
   const patch = useConfig((s) => s.patch);
   const setShortcut = useConfig((s) => s.setShortcut);
   const setQuickActionShortcut = useConfig((s) => s.setQuickActionShortcut);
-  const resetChat = useChat((s) => s.newConversation);
-  const refreshConversations = useChat((s) => s.refreshConversations);
   const [shortcut, setShortcutDraft] = useState("");
   const [quickShortcut, setQuickShortcutDraft] = useState("");
   const [searchEndpoint, setSearchDraft] = useState("");
@@ -1077,6 +1078,126 @@ function GeneralTab() {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+/** 把字节数写成人能读的形式。 */
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1048576).toFixed(2)} MB`;
+}
+
+/**
+ * 数据页：备份（导出 / 导入）与危险操作。
+ *
+ * 导出写成文件、导入选文件，都**不引入额外插件**：
+ * - 导入用 `<input type=file>`（WebView 原生支持，能可靠拿到文件内容）；
+ * - 导出由后端写到 `<应用数据目录>/exports/`，把完整路径显示出来并允许一键复制。
+ *
+ * 为什么不做「另存为」对话框：那需要 `tauri-plugin-dialog` 与相应的权限声明。
+ * 先把「备份真的能存下来」做扎实，对话框是下一步。
+ */
+function DataTab() {
+  const refreshConversations = useChat((s) => s.refreshConversations);
+  const startNewConversation = useChat((s) => s.newConversation);
+  const pushNotice = useUi((s) => s.pushNotice);
+  const fileInput = useRef<HTMLInputElement>(null);
+
+  const [busy, setBusy] = useState(false);
+  const [exported, setExported] = useState<{
+    path: string;
+    bytes: number;
+    conversations: number;
+    messages: number;
+  } | null>(null);
+  const [report, setReport] = useState<{
+    imported: number;
+    skipped: number;
+    messages: number;
+  } | null>(null);
+
+  const onExport = async () => {
+    setBusy(true);
+    try {
+      setExported(await api.exportHistory());
+    } catch (e) {
+      pushNotice(`导出失败：${e}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onPickFile = async (file: File) => {
+    setBusy(true);
+    setReport(null);
+    try {
+      // 先读成文本再交给后端：WebView 里拿不到文件的真实路径，
+      // 而为了一个导入功能引入 fs 插件与权限并不划算。
+      const text = await file.text();
+      const result = await api.importHistory(text);
+      setReport(result);
+      await refreshConversations();
+      pushNotice(
+        `导入完成：新增 ${result.imported} 个会话、${result.messages} 条消息` +
+          (result.skipped > 0 ? `，跳过 ${result.skipped} 个已存在的会话` : ""),
+      );
+    } catch (e) {
+      pushNotice(`导入失败：${e}`);
+    } finally {
+      setBusy(false);
+      // 清掉 input 的值，否则再选**同一个文件**不会触发 change
+      if (fileInput.current) fileInput.current.value = "";
+    }
+  };
+
+  return (
+    <div className="settings-section">
+      <div className="field">
+        <span>导出全部历史（含图片，JSON 格式）</span>
+        <button className="ghost-button" disabled={busy} onClick={() => void onExport()}>
+          {busy ? "处理中…" : "导出到文件"}
+        </button>
+        {exported ? (
+          <div className="settings-hint">
+            已导出 {exported.conversations} 个会话 / {exported.messages} 条消息，
+            共 {formatBytes(exported.bytes)}：
+            <div className="path-row">
+              <code className="path">{exported.path}</code>
+              <CopyButton text={exported.path} idle="复制路径" title="复制文件路径" />
+            </div>
+          </div>
+        ) : (
+          <div className="settings-hint">
+            文件会写到应用数据目录下的 <code>exports/</code> 里，文件名带时间戳。
+          </div>
+        )}
+      </div>
+
+      <div className="field">
+        <span>从备份文件导入</span>
+        <input
+          ref={fileInput}
+          type="file"
+          accept="application/json,.json"
+          disabled={busy}
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file) void onPickFile(file);
+          }}
+        />
+        <div className="settings-hint">
+          只新增，**不会覆盖**已有会话：备份里 id 已存在的会话会被跳过，
+          所以同一个文件导两次也不会产生重复。
+        </div>
+        {report ? (
+          <div className="settings-hint">
+            上次导入：新增 {report.imported} 个会话、{report.messages} 条消息，
+            跳过 {report.skipped} 个。
+          </div>
+        ) : null}
+      </div>
 
       <div className="field">
         <span>危险操作</span>
@@ -1085,7 +1206,7 @@ function GeneralTab() {
           onClick={async () => {
             if (!window.confirm("清空全部会话历史？此操作不可撤销。")) return;
             await api.clearAllHistory();
-            await resetChat();
+            await startNewConversation();
             await refreshConversations();
           }}
         >

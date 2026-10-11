@@ -125,6 +125,23 @@ export const api = {
   copyToClipboard: (text: string) =>
     invoke<void>("copy_to_clipboard", { text }),
 
+  // ---- 备份
+  //
+  // 导出由后端写文件并返回路径（不弹「另存为」对话框：那要额外插件与权限）；
+  // 导入由前端读文件内容后传进来（WebView 里拿不到文件的真实路径）。
+  exportHistory: () =>
+    invoke<{
+      path: string;
+      bytes: number;
+      conversations: number;
+      messages: number;
+    }>("export_history"),
+  importHistory: (json: string) =>
+    invoke<{ imported: number; skipped: number; messages: number }>(
+      "import_history",
+      { json },
+    ),
+
   // ---- 历史
   listConversations: (limit?: number) =>
     invoke<Conversation[]>("list_conversations", { limit: limit ?? null }),

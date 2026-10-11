@@ -51,6 +51,9 @@ pub fn run() {
             commands::chat::test_provider,
             // ---- 剪贴板
             commands::clipboard::copy_to_clipboard,
+            // ---- 备份
+            commands::backup::export_history,
+            commands::backup::import_history,
             // ---- 设置
             commands::settings::app_info,
             commands::settings::get_config,

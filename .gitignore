@@ -1,0 +1,22 @@
+# 依赖
+node_modules/
+src-tauri/target/
+
+# 构建产物
+dist/
+src-tauri/gen/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 本地临时文件
+*.log
+*.tmp
+
+# 参考项目的逐层分析笔记：含原样摘抄的第三方代码，不随公开仓库发布。
+# 详细原因见 README 的「致谢与来源说明」。
+# 文件仍然保留在本机，只是不进版本库。
+docs/analysis/

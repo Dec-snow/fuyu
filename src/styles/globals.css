@@ -1,0 +1,1341 @@
+/* ------------------------------------------------------------------
+   设计令牌
+   深浅两套色都由 data-theme 切换；组件样式只引用变量，不写死颜色。
+   ------------------------------------------------------------------ */
+
+:root {
+  --bg: rgba(252, 252, 254, 0.92);
+  --bg-elevated: rgba(255, 255, 255, 0.96);
+  --fg: #1c2030;
+  --fg-dim: #6b7280;
+  --fg-faint: #9ca3af;
+  --border: rgba(17, 24, 39, 0.1);
+  --border-strong: rgba(17, 24, 39, 0.18);
+  --hover: rgba(17, 24, 39, 0.05);
+  --accent: #6366f1;
+  --accent-2: #8b5cf6;
+  --accent-soft: rgba(99, 102, 241, 0.12);
+  --bubble-user-fg: #ffffff;
+  --bubble-ai: rgba(17, 24, 39, 0.045);
+  --code-bg: rgba(17, 24, 39, 0.06);
+  --danger: #dc2626;
+  --ok: #16a34a;
+  --shadow: 0 18px 48px rgba(15, 23, 42, 0.22);
+}
+
+[data-theme="dark"] {
+  --bg: rgba(24, 26, 34, 0.92);
+  --bg-elevated: rgba(32, 35, 45, 0.97);
+  --fg: #e8eaf0;
+  --fg-dim: #a1a7b5;
+  --fg-faint: #6f7686;
+  --border: rgba(255, 255, 255, 0.1);
+  --border-strong: rgba(255, 255, 255, 0.18);
+  --hover: rgba(255, 255, 255, 0.07);
+  --accent: #818cf8;
+  --accent-2: #a78bfa;
+  --accent-soft: rgba(129, 140, 248, 0.16);
+  --bubble-ai: rgba(255, 255, 255, 0.06);
+  --code-bg: rgba(0, 0, 0, 0.35);
+  --danger: #f87171;
+  --ok: #4ade80;
+  --shadow: 0 18px 48px rgba(0, 0, 0, 0.5);
+}
+
+/* ------------------------------------------------------------------
+   基础
+   ------------------------------------------------------------------ */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  /* 窗口本身是透明 + 无边框的，所有视觉都交给 .app 这张卡片。 */
+  background: transparent;
+  overflow: hidden;
+  color: var(--fg);
+  font-family: -apple-system, "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI",
+    "Microsoft YaHei", system-ui, sans-serif;
+  font-size: 13.5px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  border: none;
+  background: none;
+  cursor: pointer;
+  border-radius: 8px;
+  padding: 4px 8px;
+  transition: background 120ms ease, opacity 120ms ease;
+}
+
+button:hover:not(:disabled) {
+  background: var(--hover);
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+input,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 6px 9px;
+  outline: none;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+input:focus,
+textarea:focus,
+select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+textarea {
+  resize: none;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ------------------------------------------------------------------
+   窗口卡片与入场 / 退场动画
+   ------------------------------------------------------------------ */
+
+.app {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  overflow: hidden;
+  backdrop-filter: blur(24px) saturate(1.4);
+  box-shadow: var(--shadow);
+
+  /* 起始态：略微下沉 + 缩小 + 透明，就位后归零 —— 这就是「水浮现」。 */
+  opacity: 0;
+  transform: translateY(16px) scale(0.965);
+  transition:
+    opacity 220ms ease,
+    transform 380ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+[data-phase="shown"] .app {
+  opacity: 1;
+  transform: none;
+}
+
+[data-phase="leaving"] .app {
+  opacity: 0;
+  transform: translateY(10px) scale(0.985);
+  transition-duration: 200ms;
+}
+
+.app-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.app-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ------------------------------------------------------------------
+   标题栏
+   ------------------------------------------------------------------ */
+
+/* 启动失败时的兜底面板。
+   这时候 React 可能根本没挂载成功，所以样式必须自成一体、
+   不依赖任何组件类名。 */
+.boot-failure {
+  margin: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--danger);
+  border-radius: 12px;
+  background: var(--bg-elevated);
+  color: var(--fg);
+  font-size: 12.5px;
+  max-height: calc(100% - 24px);
+  overflow: auto;
+  user-select: text;
+}
+
+.boot-failure-title {
+  font-weight: 600;
+  color: var(--danger);
+  margin-bottom: 6px;
+}
+
+.boot-failure pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
+.titlebar {
+  height: 34px;
+  flex: 0 0 34px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--border);
+  /* 整条都是拖动区。按钮不用 stopPropagation 拦 —— 那只拦得住 click，
+     拦不住 mousedown，所以 TitleBar 自己在 onMouseDown 里判断事件源。 */
+  user-select: none;
+  cursor: default;
+}
+
+/* 全局提示条。
+   放在标题栏下面、绝对定位盖在内容之上：悬浮窗本来就不高，
+   占位式的提示会把消息区挤掉一截。 */
+.toast-stack {
+  position: absolute;
+  top: 40px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 90;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: min(440px, calc(100% - 20px));
+  pointer-events: none;
+}
+
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  pointer-events: auto;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow);
+  font-size: 12px;
+  line-height: 1.5;
+  animation: toast-in 140ms ease-out;
+}
+
+.toast-text {
+  flex: 1;
+  min-width: 0;
+  word-break: break-word;
+  user-select: text;
+}
+
+.toast-close {
+  flex: 0 0 auto;
+  border: none;
+  background: transparent;
+  color: var(--fg-dim);
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+}
+
+.toast-close:hover {
+  color: var(--fg);
+}
+
+.toast-more {
+  pointer-events: auto;
+  text-align: center;
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.brand {
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  background: linear-gradient(120deg, var(--accent), var(--accent-2));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.titlebar-spacer {
+  flex: 1;
+}
+
+.icon-button {
+  width: 26px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  font-size: 13px;
+  color: var(--fg-dim);
+}
+
+.icon-button:hover {
+  color: var(--fg);
+}
+
+.ghost-button {
+  font-size: 12px;
+  color: var(--fg-dim);
+  padding: 3px 8px;
+}
+
+/* ------------------------------------------------------------------
+   消息区
+   ------------------------------------------------------------------ */
+
+.message-list {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+.message-list.empty {
+  align-items: center;
+  justify-content: center;
+}
+
+.empty-hint {
+  text-align: center;
+  color: var(--fg-dim);
+}
+
+.empty-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg);
+  margin-bottom: 4px;
+}
+
+.empty-sub {
+  font-size: 12px;
+  color: var(--fg-faint);
+}
+
+.bubble-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  /* 列表用 Virtuoso 虚拟化后，间距与水平留白由每条消息自己承担。 */
+  padding: 0 14px;
+  margin-bottom: 10px;
+}
+
+/* 单条删除：默认隐形，悬停或键盘聚焦到这一行时才出现。
+   用 opacity 而不是 display —— `display: none` 的元素无法被 Tab 聚焦。 */
+.bubble-delete {
+  flex: 0 0 auto;
+  opacity: 0;
+  border: none;
+  background: transparent;
+  color: var(--fg-faint);
+  font-size: 12px;
+  padding: 2px 4px;
+  cursor: pointer;
+  transition: opacity 120ms ease;
+}
+
+.bubble-row:hover .bubble-delete,
+.bubble-delete:focus-visible {
+  opacity: 1;
+}
+
+.bubble-delete:hover {
+  color: var(--danger);
+}
+
+.bubble-row.from-user {
+  justify-content: flex-end;
+}
+
+.bubble-row.from-ai {
+  justify-content: flex-start;
+}
+
+.bubble {
+  max-width: 86%;
+  padding: 7px 11px;
+  border-radius: 13px;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+/* 从搜索结果跳进来的那条消息：短暂描边，让用户一眼看到命中在哪。 */
+.bubble.highlighted {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  animation: highlight-pulse 600ms ease-out 2;
+}
+
+@keyframes highlight-pulse {
+  from {
+    background-color: var(--accent-soft);
+  }
+  to {
+    background-color: transparent;
+  }
+}
+
+.bubble-user {
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: var(--bubble-user-fg);
+  border-bottom-right-radius: 4px;
+}
+
+.bubble-ai {
+  background: var(--bubble-ai);
+  border-bottom-left-radius: 4px;
+}
+
+.bubble-meta,
+.bubble-note {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--fg-faint);
+}
+
+.bubble-error {
+  margin-top: 6px;
+  padding: 5px 8px;
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.bubble-error-text {
+  flex: 1;
+  word-break: break-word;
+}
+
+.retry-button {
+  flex: 0 0 auto;
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 2px 10px;
+  border-radius: 20px;
+  color: #fff;
+  background: var(--danger);
+}
+
+.retry-button:hover:not(:disabled) {
+  background: var(--danger);
+  filter: brightness(1.1);
+}
+
+/* 用户消息的「双击编辑」态 */
+.edit-box {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.edit-box textarea {
+  width: 100%;
+  min-width: 260px;
+  padding: 7px 9px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.16);
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  color: inherit;
+}
+
+.edit-box textarea:focus {
+  border-color: rgba(255, 255, 255, 0.7);
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.15);
+}
+
+.edit-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.edit-hint {
+  font-size: 10.5px;
+  opacity: 0.75;
+}
+
+.edit-send {
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 2px 10px;
+  border-radius: 20px;
+  color: var(--accent);
+  background: rgba(255, 255, 255, 0.92);
+}
+
+.edit-send:hover:not(:disabled) {
+  background: #fff;
+}
+
+/* 工具开关（输入框工具栏） */
+.tools-toggle {
+  font-size: 11.5px;
+  color: var(--fg-dim);
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+}
+
+.tools-toggle.on {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  font-weight: 600;
+}
+
+/* 助手气泡里的工具调用时间线 */
+.tool-timeline {
+  margin-bottom: 6px;
+  padding-bottom: 6px;
+  border-bottom: 1px dashed var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.tool-step {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--fg-dim);
+}
+
+.tool-icon {
+  width: 16px;
+  text-align: center;
+  flex: 0 0 auto;
+}
+
+.tool-icon.tool-ok {
+  color: var(--ok);
+}
+
+.tool-icon.tool-error,
+.tool-icon.tool-rejected {
+  color: var(--danger);
+}
+
+.tool-name {
+  font-weight: 600;
+  flex: 0 0 auto;
+}
+
+.tool-result {
+  opacity: 0.85;
+  word-break: break-all;
+}
+
+/* 敏感工具审批卡 */
+.approval-stack {
+  position: absolute;
+  left: 50%;
+  bottom: 10px;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: min(420px, calc(100% - 24px));
+  z-index: 10;
+  /* 悬浮窗可以被拖到很矮（最小高度 180px），输入框又会长高，
+     留给 `.message-list` 的高度可能只有十几像素。这时审批卡会被
+     `.message-list` 的 `overflow: hidden` 裁成一条缝 —— 标题看不见、
+     按钮点不到，而 Esc 也不是退路（它会把整个窗口藏起来）。
+     所以自己带滚动，保证按钮永远够得着。 */
+  max-height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.approval-card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  padding: 10px 12px;
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.approval-title {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.approval-summary {
+  font-size: 11.5px;
+  color: var(--fg-dim);
+  word-break: break-word;
+  max-height: 72px;
+  overflow-y: auto;
+}
+
+.approval-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.approval-actions button {
+  font-size: 11.5px;
+  padding: 3px 10px;
+  border-radius: 20px;
+  background: var(--hover);
+}
+
+.approval-allow {
+  color: var(--ok);
+  font-weight: 600;
+}
+
+.approval-deny {
+  color: var(--danger);
+}
+
+/* 滚动摘要横幅 */
+.message-scroll {
+  flex: 1;
+  min-height: 0;
+}
+
+.summary-banner {
+  flex: 0 0 auto;
+  max-height: 32%;
+  overflow-y: auto;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elevated);
+}
+
+.summary-toggle {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--fg-dim);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.summary-toggle:hover {
+  color: var(--fg);
+}
+
+.summary-count {
+  font-weight: 400;
+  opacity: 0.75;
+}
+
+.summary-body {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--fg-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* 图片：气泡里的展示 + 输入框上的待发送缩略图 */
+.bubble-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.bubble-image {
+  max-width: 180px;
+  max-height: 180px;
+  border-radius: 8px;
+  object-fit: cover;
+  display: block;
+}
+
+.attachment-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 6px 12px 0;
+}
+
+.attachment {
+  position: relative;
+}
+
+.attachment img {
+  width: 56px;
+  height: 56px;
+  border-radius: 8px;
+  object-fit: cover;
+  display: block;
+  border: 1px solid var(--border);
+}
+
+.attachment-remove {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  font-size: 13px;
+  line-height: 1;
+  color: #fff;
+  background: var(--danger);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.composer.dragging {
+  outline: 2px dashed var(--accent);
+  outline-offset: -4px;
+}
+
+.drop-hint {
+  font-size: 11.5px;
+  color: var(--accent);
+  text-align: center;
+  padding: 4px 0 6px;
+}
+
+.caret {
+  display: inline-block;
+  width: 6px;
+  height: 13px;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: currentColor;
+  opacity: 0.75;
+  animation: blink 1s steps(2, start) infinite;
+}
+
+@keyframes blink {
+  to {
+    visibility: hidden;
+  }
+}
+
+.reasoning {
+  margin-bottom: 6px;
+  padding-bottom: 6px;
+  border-bottom: 1px dashed var(--border);
+}
+
+.reasoning-toggle {
+  font-size: 11.5px;
+  color: var(--fg-dim);
+  padding: 0;
+}
+
+.reasoning pre {
+  margin: 4px 0 0;
+  max-height: 180px;
+  overflow: auto;
+  font-size: 11.5px;
+  color: var(--fg-dim);
+  white-space: pre-wrap;
+}
+
+/* ------------------------------------------------------------------
+   Markdown
+   ------------------------------------------------------------------ */
+
+.md p {
+  margin: 0 0 6px;
+  white-space: pre-wrap;
+}
+
+.md p:last-child {
+  margin-bottom: 0;
+}
+
+.md code {
+  font-family: "Cascadia Mono", Consolas, "Courier New", monospace;
+  font-size: 12px;
+  background: var(--code-bg);
+  padding: 1px 5px;
+  border-radius: 5px;
+}
+
+.md-code {
+  position: relative;
+  margin: 6px 0;
+  border-radius: 9px;
+  background: var(--code-bg);
+  overflow: hidden;
+}
+
+.md-code-lang {
+  padding: 3px 9px;
+  font-size: 10.5px;
+  color: var(--fg-faint);
+  border-bottom: 1px solid var(--border);
+  text-transform: lowercase;
+}
+
+.md-code pre {
+  margin: 0;
+  padding: 8px 10px;
+  overflow-x: auto;
+}
+
+.md-code pre code {
+  background: none;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+/* ------------------------------------------------------------------
+   输入区
+   ------------------------------------------------------------------ */
+
+.composer {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--border);
+  padding: 6px 10px 9px;
+  background: linear-gradient(transparent, var(--bg) 40%);
+}
+
+.composer-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 5px;
+  min-height: 22px;
+}
+
+.model-picker {
+  display: flex;
+  gap: 5px;
+  min-width: 0;
+}
+
+.model-picker select {
+  max-width: 150px;
+  padding: 2px 6px;
+  font-size: 11.5px;
+  border-radius: 7px;
+  background: transparent;
+}
+
+.picker-empty {
+  font-size: 11.5px;
+  color: var(--fg-faint);
+}
+
+.composer-input {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+}
+
+.composer-input textarea {
+  flex: 1;
+  min-height: 34px;
+  max-height: 180px;
+  padding: 7px 10px;
+  border-radius: 11px;
+  line-height: 1.5;
+}
+
+.send-button {
+  flex: 0 0 auto;
+  height: 34px;
+  padding: 0 14px;
+  border-radius: 11px;
+  font-weight: 600;
+  color: #fff;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+}
+
+.send-button:hover:not(:disabled) {
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  filter: brightness(1.08);
+}
+
+.send-button.stop {
+  background: var(--danger);
+}
+
+/* ------------------------------------------------------------------
+   历史侧栏（完整模式）
+   ------------------------------------------------------------------ */
+
+.sidebar {
+  flex: 0 0 232px;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+  padding: 8px;
+  min-height: 0;
+}
+
+.sidebar-search input {
+  width: 100%;
+  font-size: 12px;
+}
+
+.sidebar-new {
+  margin: 8px 0;
+  padding: 6px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.sidebar-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sidebar-hint {
+  padding: 8px 6px;
+  font-size: 12px;
+  color: var(--fg-faint);
+}
+
+.conv-item {
+  display: flex;
+  align-items: center;
+  border-radius: 9px;
+}
+
+.conv-item:hover {
+  background: var(--hover);
+}
+
+.conv-item.active {
+  background: var(--accent-soft);
+}
+
+.conv-main {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  padding: 5px 7px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.conv-title {
+  font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.conv-meta {
+  font-size: 10.5px;
+  color: var(--fg-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.conv-actions {
+  display: none;
+  gap: 1px;
+  padding-right: 4px;
+}
+
+/* 键盘也要够得着：`display: none` 的元素无法被 Tab 聚焦，
+   而 Chromium 不会因为获得焦点就触发 `:hover` —— 只用鼠标才出现的话，
+   重命名 / 置顶 / 删除这三个操作对纯键盘用户等于不存在。 */
+.conv-item:hover .conv-actions,
+.conv-item:focus-within .conv-actions {
+  display: flex;
+}
+
+.conv-actions button {
+  padding: 2px 4px;
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
+.hit-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 6px 7px;
+  border-radius: 9px;
+}
+
+.hit-title {
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hit-snippet {
+  font-size: 11px;
+  color: var(--fg-dim);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.hit-meta {
+  margin-top: 2px;
+  font-size: 10px;
+  color: var(--fg-faint);
+}
+
+/* 侧栏底部的「加载更多」。 */
+.sidebar-more {
+  width: 100%;
+  margin-top: 6px;
+  padding: 6px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fg-dim);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.sidebar-more:hover {
+  color: var(--fg);
+  border-color: var(--accent);
+}
+
+/* ------------------------------------------------------------------
+   设置面板
+   ------------------------------------------------------------------ */
+
+.settings-backdrop {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(10, 12, 20, 0.35);
+  backdrop-filter: blur(2px);
+  padding: 14px;
+  /* 必须高于审批卡的 z-index: 10 —— 两者在同一个层叠上下文里
+     （`.message-list` 只是 `position: relative`、`z-index: auto`，
+     不构成新的层叠上下文）。不给的话，设置面板打开后审批卡会浮在它上面
+     并且照样可以点击：用户看着设置界面就批准了一个工具。 */
+  z-index: 100;
+}
+
+.settings-panel {
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  overflow: hidden;
+  box-shadow: var(--shadow);
+}
+
+.settings-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-tabs {
+  display: flex;
+  gap: 2px;
+  flex: 1;
+}
+
+.settings-tabs button {
+  font-size: 12.5px;
+  padding: 4px 10px;
+  color: var(--fg-dim);
+}
+
+.settings-tabs button.active {
+  color: var(--fg);
+  background: var(--accent-soft);
+  font-weight: 600;
+}
+
+.settings-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+.settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.settings-note {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--fg-dim);
+  background: var(--accent-soft);
+  padding: 8px 10px;
+  border-radius: 9px;
+}
+
+.settings-hint {
+  font-size: 11.5px;
+  color: var(--fg-dim);
+}
+
+.settings-hint.path {
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 11px;
+  word-break: break-all;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 12.5px;
+}
+
+.field > span {
+  color: var(--fg-dim);
+}
+
+.field.checkbox {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+.field.checkbox input {
+  width: 15px;
+  height: 15px;
+}
+
+.provider-card {
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.provider-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 删除按钮推到最右，不与名称/徽标挤在一起。 */
+.provider-delete {
+  margin-left: auto;
+  border: none;
+  background: transparent;
+  color: var(--fg-faint);
+  font-size: 11.5px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.provider-delete:hover {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
+
+.provider-name {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.key-badge {
+  font-size: 10.5px;
+  padding: 1px 7px;
+  border-radius: 20px;
+}
+
+.key-badge.ok {
+  color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 14%, transparent);
+}
+
+.key-badge.missing {
+  color: var(--fg-faint);
+  background: var(--hover);
+}
+
+.text-input {
+  width: 100%;
+  font-size: 12px;
+}
+
+.base-url-row {
+  display: flex;
+  gap: 6px;
+}
+
+.base-url-row button {
+  flex: 0 0 auto;
+  font-size: 12px;
+  padding: 4px 10px;
+  background: var(--hover);
+}
+
+.provider-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.provider-actions button {
+  font-size: 12px;
+  padding: 4px 10px;
+  background: var(--hover);
+}
+
+.provider-message {
+  font-size: 11.5px;
+  color: var(--fg-dim);
+  word-break: break-word;
+}
+
+/* 字段下方的补充说明。 */
+.field-hint {
+  display: block;
+  margin-top: 3px;
+  font-size: 11px;
+  font-style: normal;
+  color: var(--fg-faint);
+  line-height: 1.5;
+}
+
+/* 「已永久允许的工具」：每个工具一个可点击的胶囊，点一下就是撤销授权。 */
+.granted-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.granted-chip {
+  border: 1px solid var(--border-strong);
+  background: var(--accent-soft);
+  color: var(--fg);
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.granted-chip:hover {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.model-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.model-tag {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  overflow: hidden;
+  font-size: 11.5px;
+}
+
+.model-tag.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.model-tag-main {
+  padding: 2px 9px;
+  border-radius: 0;
+  font-size: 11.5px;
+}
+
+.model-tag-remove {
+  padding: 2px 7px;
+  border-radius: 0;
+  color: var(--fg-faint);
+  font-size: 12px;
+}
+
+.danger-button {
+  align-self: flex-start;
+  font-size: 12px;
+  padding: 5px 11px;
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+}

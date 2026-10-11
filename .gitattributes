@@ -1,0 +1,16 @@
+# 一律以 LF 存进仓库。
+#
+# 为什么需要它：Windows 上 git 默认 core.autocrlf=true，检出时会把工作区的
+# 文件换成 CRLF —— 仓库内容本身仍然是 LF（GitHub 上看到的也是 LF），
+# 但不同机器/不同配置下「谁提交了什么换行符」会变成噪音，
+# 甚至出现「整个文件都改了」的假 diff。这里把规则钉死。
+* text=auto eol=lf
+
+# 二进制文件不要做任何换行符转换
+*.png binary
+*.ico binary
+*.icns binary
+*.jpg binary
+*.webp binary
+*.exe binary
+*.dll binary

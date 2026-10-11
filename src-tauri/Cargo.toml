@@ -1,0 +1,64 @@
+[package]
+name = "floatai"
+version = "0.1.0"
+description = "FloatAI · 桌面悬浮窗 AI 聊天助手（OpenAI 兼容）"
+authors = ["FloatAI"]
+edition = "2021"
+
+[lib]
+name = "floatai_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-single-instance = "2"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# 网络与流式：reqwest 负责 HTTP/SSE，tokio 负责异步与取消。
+# `net` / `io-util` / `rt-multi-thread` 是集成测试里的本地假 SSE 服务端要用的。
+reqwest = { version = "0.12", features = ["json", "stream"] }
+tokio = { version = "1", features = [
+    "sync",
+    "time",
+    "macros",
+    "rt-multi-thread",
+    "net",
+    "io-util",
+] }
+tokio-util = "0.7"
+futures-util = "0.3"
+
+# 本地持久化：SQLite（bundled 自带 C 源码，机器上无需预装 SQLite）。
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# API Key 存入 Windows 凭据管理器，不落盘、不回传前端。
+keyring = { version = "3", features = ["windows-native"] }
+
+# 工具系统：剪贴板读写（读写剪贴板是「敏感工具」，用来演示三级授权）。
+arboard = "3"
+# 时间工具：本地时间格式化。
+chrono = "0.4"
+# 联网工具的 URL 解析（校验 scheme / host / 重定向目标）。
+url = "2"
+
+[target.'cfg(windows)'.dependencies]
+# 圆角属性（DWM）+ 划词取词（SendInput / GetAsyncKeyState）。
+# 版本必须与 tauri 依赖的 `windows` 保持一致，否则 `HWND` 是两个不同的类型。
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_UI_Input_KeyboardAndMouse",
+] }
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"

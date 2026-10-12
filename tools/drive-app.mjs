@@ -711,7 +711,9 @@ const scenarios = {
 
     // 等图片出现（应用会把它作为一条助手消息追加进会话）
     try {
-      await waitFor(`document.querySelectorAll("img").length > 0`, "图片出现", 30000);
+        // 图片不一定是 <img>：data URL 往往挂在 style 的 background-image 上。
+        // 判据取"整个 DOM 里出现过 data:image"，比盯某个标签稳。
+        await waitFor(`document.body.innerHTML.includes("data:image")`, "图片出现", 45000);
     } catch {
       const dump = await evalJs(`
         const notices = Array.from(document.querySelectorAll(".notice, .toast, .error"))
@@ -721,7 +723,12 @@ const scenarios = {
         return { notices, tail: document.body.innerText.replace(/\\n+/g, " ").slice(-260) };
       `);
       console.log(`  提示：${dump.notices || "(无)"}`);
-      console.log(`  界面尾部：${dump.tail}`);
+        console.log(`  界面尾部：${dump.tail}`);
+        const html = await evalJs(`
+          const list = document.querySelector(".message-list, .messages, main") ?? document.body;
+          return list.innerHTML.replace(/\\s+/g, " ").slice(-700);
+        `);
+        console.log(`  消息区 HTML 尾部：${html}`);
       throw new Error("图片没有出现（原因见上）");
     }
 

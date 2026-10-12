@@ -12,6 +12,7 @@ import {
   startEventBridge,
 } from "./services/events";
 import { bindChatEvents, useChat } from "./stores/chat";
+import { bindCompareEvents } from "./stores/compare";
 import { applyAppearance, applyTheme, useConfig } from "./stores/config";
 import { useProviders } from "./stores/providers";
 import { useUi } from "./stores/ui";
@@ -109,6 +110,8 @@ async function boot() {
   // 总好过整个窗口一片透明。
   try {
     bindChatEvents();
+    // 一问多答面板也吃同一份事件流（它按自己的 requestId 过滤）
+    bindCompareEvents();
     await startEventBridge();
   } catch (e) {
     useUi.getState().pushNotice(`事件通道初始化失败：${e}`);

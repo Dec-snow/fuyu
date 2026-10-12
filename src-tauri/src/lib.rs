@@ -78,6 +78,8 @@ pub fn run() {
             commands::autostart::started_minimized,
             // ---- 用量与费用
             commands::usage::usage_report,
+            // ---- 一问多答
+            commands::compare::adopt_answer,
             // ---- 长期记忆
             commands::memory::memory_list,
             commands::memory::memory_stats,

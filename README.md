@@ -66,11 +66,12 @@
 | **Office 文档解析** | 拖入 `.docx / .xlsx / .pptx`（单文件 9 MB）→ 由 Rust 解 ZIP+XML 提取文字（Word 段落与表格、Excel 多工作表含共享字符串、PPT 分页标注）→ 再当普通附件用。有 zip bomb 防护与 256 KB 正文上限（超了**明确标注**「已截断」，不悄悄丢） |
 | **本地知识库（BM25）** | 「设置 → 知识库」导入文档（Office 或纯文本 / 粘贴），自动切块并建倒排索引；聊天时打开工具开关，模型会**自己检索**这些资料并在回答里标出来源。中文走「单字 + 双字」索引，检索结果页面里可以直接试搜。全程本地，数据不出机器 |
 | **长期记忆** | 模型在对话里遇到长期有用的事实时自己记下来（也可手动添加），下次提问时**相关的几条**会跟着系统提示词一起发出去。写入时按「说的是不是同一件事」**自动合并**，所以不会攒出二十条「用户喜欢 Rust」。界面里能看每条被用过几次、能试搜哪些会被带上、能逐条删 |
+| **一问多答** | 输入框旁的「对比」按钮：同一个问题**并发**发给最多 4 个模型（可以跨服务商），回答并排显示、各自独立流式、可单独停止。对比**不写进聊天记录**（草稿纸），看中了点「采用这条」才把那一问一答放进当前会话 |
 
 ## 未实现（留给下一版）
 
 MCP 客户端、技能（Skill）、
-PDF 解析、文生图、一问多答、自动更新。
+PDF 解析、文生图、自动更新。
 
 这些功能在参考项目里都有实现。作者对参考项目的逐层拆解笔记（含原样摘抄的代码）
 **只保留在本地，没有随本仓库发布**，原因见文末「致谢与来源说明」；
@@ -211,7 +212,7 @@ msedge --headless=new --virtual-time-budget=20000 --screenshot=dist/preview-merm
   --window-size=640,1100 "file:///<你的路径>/dist/preview-mermaid.html"
 
 python tools/check-preview.py dist/preview.png --set=ssr        # 8 项
-python tools/check-preview.py dist/preview-mermaid.png --set=client  # 11 项
+python tools/check-preview.py dist/preview-mermaid.png --set=client  # 17 项
 ```
 
 文档解析的测试夹具是**真的 Office 文件**（由 python-docx / openpyxl / python-pptx
@@ -237,10 +238,10 @@ cd src-tauri && cargo clippy --all-targets -- -D warnings
 
 | 检查 | 结果 |
 |---|---|
-| `cargo test` | **315 passed / 0 failed**（不联网；含真开 TCP 端口的流式 / 抓取 / 搜索集成测试、**真读写系统剪贴板**的往返测试、**备份导出→导入**的往返测试、**真 Office 文件**的解析测试、**知识库检索质量**测试，以及**长期记忆从入库到拼进提示词**的端到端测试） |
+| `cargo test` | **317 passed / 0 failed**（不联网；含真开 TCP 端口的流式 / 抓取 / 搜索集成测试、**真读写系统剪贴板**的往返测试、**备份导出→导入**的往返测试、**真 Office 文件**的解析测试、**知识库检索质量**测试，以及**长期记忆从入库到拼进提示词**的端到端测试） |
 | `cargo clippy --all-targets -- -D warnings` | 通过，0 warning |
 | `cargo fmt --check` | 通过 |
-| `npm test`（vitest） | **255 passed / 0 failed**（含 11 条直接驱动 store 的竞态/接线测试，以及组件级渲染断言） |
+| `npm test`（vitest） | **283 passed / 0 failed**（含 11 条直接驱动 store 的竞态/接线测试、10 条一问多答的并发与事件路由测试，以及组件级渲染断言） |
 | `npm run build`（tsc + vite） | 通过，产物 267 KB JS / 16.4 KB CSS |
 | debug 二进制启动 | 进程存活，无 panic，无 stderr 输出 |
 | **旧版配置兼容** | 用「加字段之前写下的 `providers.json`」启动，进程正常存活（新字段回落默认值） |

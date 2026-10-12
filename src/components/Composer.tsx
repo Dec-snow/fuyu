@@ -12,6 +12,7 @@ import {
   type Attachment,
 } from "../lib/attachments";
 import { api } from "../services/api";
+import { useCompare } from "../stores/compare";
 import { useChat } from "../stores/chat";
 import { useUi } from "../stores/ui";
 import { ModelPicker } from "./ModelPicker";
@@ -43,6 +44,17 @@ function fileToDataUrl(file: File): Promise<string | null> {
     reader.onerror = () => resolve(null);
     reader.readAsDataURL(file);
   });
+}
+
+/** 把输入框里已经写好的问题带到对比面板上。 */
+function openCompareWith(question: string) {
+  const store = useCompare.getState();
+  store.openPanel();
+  store.setQuestion(question);
+}
+
+function openComparePanel() {
+  useCompare.getState().openPanel();
 }
 
 export function Composer() {
@@ -386,6 +398,17 @@ export function Composer() {
           onKeyDown={onKeyDown}
           onPaste={onPaste}
         />
+        <button
+          className="compare-button"
+          title="一问多答：把这个问题同时发给多个模型，并排看回答"
+          onClick={() => {
+            // 输入框里已经有问题时带过去 —— 用户多半是先写好再想起要对比的
+            if (text.trim()) openCompareWith(text);
+            else openComparePanel();
+          }}
+        >
+          对比
+        </button>
         {busy ? (
           <button className="send-button stop" onClick={() => void cancel()}>
             停止

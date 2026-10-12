@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 
 import { Composer } from "./components/Composer";
+import { ComparePanel } from "./components/ComparePanel";
 import { MessageList } from "./components/MessageList";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { Sidebar } from "./components/Sidebar";
@@ -104,6 +105,7 @@ export default function App() {
         </main>
       </div>
       {settingsOpen ? <SettingsPanel /> : null}
+      <ComparePanel />
     </div>
   );
 }

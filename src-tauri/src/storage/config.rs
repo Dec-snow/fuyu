@@ -182,6 +182,21 @@ pub struct AppConfig {
     /// 读过本地敏感数据要再确认一次」，所以这里也默认关，由用户明确打开。
     #[serde(default)]
     pub memory_enabled: bool,
+    /// 一问多答的对比目标（最多 4 个）。
+    ///
+    /// 存的是「上次对比用的是哪几个模型」—— 这是一个频繁重复的选择，
+    /// 每次打开面板都重选一遍很烦；但它不是「当前生效的配置」，
+    /// 面板里随时可以改。
+    #[serde(default)]
+    pub compare_targets: Vec<CompareTarget>,
+}
+
+/// 一问多答里的一个目标（服务商 + 模型）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompareTarget {
+    pub provider_id: String,
+    pub model_key: String,
 }
 
 fn default_window_opacity() -> f32 {
@@ -225,6 +240,7 @@ impl Default for AppConfig {
             roles: Role::presets(),
             autostart: false,
             memory_enabled: false,
+            compare_targets: Vec::new(),
         }
     }
 }

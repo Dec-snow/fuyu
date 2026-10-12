@@ -9,7 +9,9 @@
 
 import { createRoot } from "react-dom/client";
 
+import { ComparePanel } from "../src/components/ComparePanel";
 import { Markdown } from "../src/components/Markdown";
+import { useCompare } from "../src/stores/compare";
 // 注意：KaTeX 的样式表是在 `src/main.tsx` 里引的，而这个入口不经过 main.tsx，
 // 所以要**自己引一次** —— 否则验证页里公式没有字体，「KaTeX 字体生效」会红。
 // （第一版就是这样：看着像产品问题，其实是验证页少了一行 import。）
@@ -68,6 +70,102 @@ function mount() {
 
   createRoot(light).render(<Markdown text={MIXED} />);
   createRoot(dark).render(<Markdown text={MERMAID_SEQ} />);
+
+  mountCompare();
+}
+
+/**
+ * 对比面板：往 store 里塞一份「跑完的」状态再挂载。
+ *
+ * 这样能验证的是**渲染**（N 列、模型名、按钮、失败态、流式态），
+ * 不是网络 —— 面板的并发发送由 store 的单测覆盖。
+ */
+function mountCompare() {
+  // 面板的遮罩是 `position: fixed`（真机上要盖住整个窗口）。在这个验证页里
+  // 那会把上面两个用来查**高亮配色**的样例一起压暗，于是「keyword #7c3aed」
+  // 之类的精确配色检查全部落空 —— 那是验证页的问题，不是产品的问题。
+  // 所以在挂载点范围内把遮罩改回静态定位。
+  const scope = document.createElement("style");
+  scope.textContent =
+    "#compare-host .compare-backdrop{position:static;background:none;padding:0;}" +
+    "#compare-host .compare-panel{box-shadow:none;}";
+  document.head.appendChild(scope);
+
+  const host = document.createElement("div");
+  host.id = "compare-host";
+  document.body.appendChild(host);
+
+  useCompare.setState({
+    open: true,
+    question: "用一句话解释什么是闭包",
+    targets: [
+      { providerId: "a", modelKey: "模型甲" },
+      { providerId: "b", modelKey: "模型乙" },
+      { providerId: "c", modelKey: "模型丙" },
+      { providerId: "d", modelKey: "模型丁" },
+    ],
+    results: [
+      {
+        providerId: "a",
+        modelKey: "模型甲",
+        requestId: "r-a",
+        label: "服务商甲 · 模型甲",
+        content: "闭包是**带着环境**的函数。",
+        reasoning: "",
+        streaming: false,
+        cancelled: false,
+        error: null,
+        inputTokens: 10,
+        outputTokens: 20,
+        adopted: false,
+      },
+      {
+        providerId: "b",
+        modelKey: "模型乙",
+        requestId: "r-b",
+        label: "服务商乙 · 模型乙",
+        content: "",
+        reasoning: "",
+        streaming: true,
+        cancelled: false,
+        error: null,
+        inputTokens: 0,
+        outputTokens: 0,
+        adopted: false,
+      },
+      {
+        providerId: "c",
+        modelKey: "模型丙",
+        requestId: "r-c",
+        label: "服务商丙 · 模型丙",
+        content: "闭包就是一个能记住出生环境的函数。",
+        reasoning: "",
+        streaming: false,
+        cancelled: false,
+        error: null,
+        inputTokens: 5,
+        outputTokens: 8,
+        adopted: true,
+      },
+      {
+        providerId: "d",
+        modelKey: "模型丁",
+        requestId: "r-d",
+        label: "服务商丁 · 模型丁",
+        content: "",
+        reasoning: "",
+        streaming: false,
+        cancelled: false,
+        error: "[TIMEOUT] 请求超时",
+        inputTokens: 0,
+        outputTokens: 0,
+        adopted: false,
+      },
+    ],
+    notice: null,
+  } as never);
+
+  createRoot(host).render(<ComparePanel />);
 }
 
 /**
@@ -110,8 +208,17 @@ function probeWhenReady(deadlineMs = 15000) {
   tick();
 }
 
-/** 把结果画成绿/红方块（第一行 8 项是基础渲染，第二行是 mermaid）。 */
+/** 把结果画成绿/红方块（第一行 8 项是基础渲染，第二行是 mermaid，第三行是对比面板）。 */
 function paint(mermaid: Record<string, boolean>) {
+  const compareCols = document.querySelectorAll(".compare-col");
+  const compareErrors = document.querySelectorAll(".compare-error");
+  const compareStates = Array.from(
+    document.querySelectorAll(".compare-col-state"),
+  ).map((el) => el.textContent ?? "");
+  const compareButtons = Array.from(
+    document.querySelectorAll(".compare-col-foot button"),
+  ).map((el) => el.textContent ?? "");
+
   const checks: [string, boolean][] = [
     ["KaTeX 渲染", !!document.querySelector(".katex")],
     ["KaTeX 字体生效", (() => {
@@ -127,6 +234,13 @@ function paint(mermaid: Record<string, boolean>) {
     ["深色主题也画了", mermaid.darkRendered],
     ["svg 里没有脚本/事件", mermaid.svgSafe],
     ["两张图都画了", mermaid.twoDiagrams],
+    // ---- 对比面板
+    ["对比面板渲染出 4 列", compareCols.length === 4],
+    ["三列有内容、一列报错", compareErrors.length === 1 && compareCols.length === 4],
+    ["流式列显示生成中", compareStates.some((s) => s.includes("生成中"))],
+    ["采用过的显示已采用", compareStates.some((s) => s.includes("已采用"))],
+    ["每列都有「采用这条」", compareButtons.filter((t) => t.includes("采用")).length === 4],
+    ["失败那列没有内容但有错误", compareErrors.length === 1],
   ];
 
   const strip = document.createElement("div");

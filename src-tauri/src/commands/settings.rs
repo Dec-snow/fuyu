@@ -6,7 +6,8 @@ use tauri::State;
 use crate::errors::{AppError, AppResult};
 use crate::models::config::AppInfo;
 use crate::storage::config::{
-    AppConfig, ConfigStore, Role, MAX_FONT_SIZE, MIN_FONT_SIZE, MIN_WINDOW_OPACITY,
+    AppConfig, CompareTarget, ConfigStore, ProviderConfig, Role, MAX_FONT_SIZE, MIN_FONT_SIZE,
+    MIN_WINDOW_OPACITY,
 };
 use crate::storage::database::Database;
 
@@ -63,15 +64,56 @@ pub struct SettingsPatch {
     pub roles: Option<Vec<Role>>,
     /// 长期记忆开关（打开后会把相关记忆随请求发给服务商）。
     pub memory_enabled: Option<bool>,
+    /// 一问多答的对比目标（整表覆写，与 roles 同一个思路）。
+    pub compare_targets: Option<Vec<CompareTarget>>,
 }
 
 /// 角色数量上限。
 ///
 /// 不是洁癖：角色提示词会被拼进每一次请求，一份塞了几百个角色的配置会让
 /// 每个请求白白多花几千 token，设置面板也会长到没法用。
+/// 一问多答最多几个模型。与前端 lib/compare.ts 的 MAX_COMPARE_TARGETS 对齐。
+const MAX_COMPARE_TARGETS: usize = 4;
+
 const MAX_ROLES: usize = 50;
 /// 单个角色提示词的长度上限（字符数）。
 const MAX_ROLE_PROMPT_CHARS: usize = 4_000;
+
+/// 规整对比目标：去空、去重、丢掉已经不存在的服务商、夹到上限。
+///
+/// 与 `sanitize_roles` 不同，这里**静默丢弃**坏项而不是报错：对比目标是一个
+/// 「上次用过哪几个模型」的偏好，用户在设置里删掉一个服务商、下次打开面板时
+/// 那个目标自然该消失 —— 为此弹一个错误反而莫名其妙。
+fn sanitize_compare_targets(
+    targets: Vec<CompareTarget>,
+    providers: &[ProviderConfig],
+) -> Vec<CompareTarget> {
+    let known: std::collections::HashSet<&str> = providers.iter().map(|p| p.id.as_str()).collect();
+
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for target in targets {
+        let provider_id = target.provider_id.trim().to_string();
+        let model_key = target.model_key.trim().to_string();
+        if provider_id.is_empty() || model_key.is_empty() {
+            continue;
+        }
+        if !known.contains(provider_id.as_str()) {
+            continue;
+        }
+        if !seen.insert((provider_id.clone(), model_key.clone())) {
+            continue;
+        }
+        out.push(CompareTarget {
+            provider_id,
+            model_key,
+        });
+        if out.len() >= MAX_COMPARE_TARGETS {
+            break;
+        }
+    }
+    out
+}
 
 /// 规整角色列表：名字与提示词不能为空、id 不能重复、数量与长度都有上限。
 ///
@@ -247,6 +289,9 @@ pub async fn update_settings(
         if let Some(enabled) = patch.memory_enabled {
             cfg.memory_enabled = enabled;
         }
+        if let Some(targets) = patch.compare_targets {
+            cfg.compare_targets = sanitize_compare_targets(targets, &cfg.providers);
+        }
         // 改完代理立刻重建 HTTP 客户端，否则要重启才生效。
         Ok(cfg.clone())
     })
@@ -327,6 +372,70 @@ mod tests {
         assert_eq!(out[0].id, "r1");
         assert_eq!(out[0].name, "翻译官");
         assert_eq!(out[0].prompt, "你是翻译。");
+    }
+
+    // ---------------- 一问多答的对比目标
+
+    fn provider(id: &str) -> ProviderConfig {
+        ProviderConfig {
+            id: id.to_string(),
+            name: id.to_string(),
+            base_url: String::new(),
+            models: Vec::new(),
+            is_preset: false,
+        }
+    }
+
+    fn target(provider_id: &str, model_key: &str) -> CompareTarget {
+        CompareTarget {
+            provider_id: provider_id.to_string(),
+            model_key: model_key.to_string(),
+        }
+    }
+
+    #[test]
+    fn compare_targets_are_trimmed_deduplicated_and_capped() {
+        let providers = vec![provider("p1"), provider("p2")];
+        let out = sanitize_compare_targets(
+            vec![
+                target(" p1 ", " m1 "),
+                // 同一个「服务商 + 模型」重复：对比两次毫无意义，而消耗是实打实的
+                target("p1", "m1"),
+                target("p2", "m1"),
+                target("p1", "m2"),
+                target("p1", "m3"),
+                target("p1", "m4"),
+            ],
+            &providers,
+        );
+        assert_eq!(out.len(), MAX_COMPARE_TARGETS, "应当夹到上限");
+        assert_eq!(out[0].provider_id, "p1");
+        assert_eq!(out[0].model_key, "m1", "首尾空格要去掉");
+        // 去重后顺序保持不变
+        assert_eq!(
+            out.iter()
+                .map(|t| format!("{}/{}", t.provider_id, t.model_key))
+                .collect::<Vec<_>>(),
+            vec!["p1/m1", "p2/m1", "p1/m2", "p1/m3"]
+        );
+    }
+
+    #[test]
+    fn compare_targets_drop_unknown_providers_and_blanks() {
+        let providers = vec![provider("p1")];
+        let out = sanitize_compare_targets(
+            vec![
+                target("", "m"),
+                target("p1", "  "),
+                // 服务商已经被删掉了：这是个「上次用过哪几个模型」的偏好，
+                // 静默丢掉才对，为此弹错误反而莫名其妙
+                target("已删除的服务商", "m"),
+                target("p1", "m"),
+            ],
+            &providers,
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].model_key, "m");
     }
 
     #[test]

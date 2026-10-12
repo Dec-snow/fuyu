@@ -2,6 +2,7 @@ pub mod autostart;
 pub mod backup;
 pub mod chat;
 pub mod clipboard;
+pub mod compare;
 pub mod diagnostics;
 pub mod documents;
 pub mod history;

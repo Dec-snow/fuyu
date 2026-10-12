@@ -6,8 +6,10 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import type {
+  AdoptedTurn,
   AppConfig,
   AppInfo,
+  CompareTarget,
   Conversation,
   Diagnostics,
   KbDocument,
@@ -37,6 +39,8 @@ export interface SettingsPatch {
   quickActionEnabled?: boolean;
   /** 长期记忆开关。 */
   memoryEnabled?: boolean;
+  /** 一问多答的对比目标（整表覆写）。 */
+  compareTargets?: CompareTarget[];
   webSearchEndpoint?: string;
   proxyUrl?: string;
   useSystemProxy?: boolean;
@@ -115,6 +119,19 @@ export const api = {
   }) => invoke<string>("chat_send", { request }),
   chatCancel: (requestId: string) =>
     invoke<boolean>("chat_cancel", { requestId }),
+  /**
+   * 把一问多答里选中的那一问一答写进会话。
+   *
+   * 对比本身**不落库**（请求带 `conversationId: null`），只有「采用」这一步
+   * 才产生真正的消息 —— 对比是草稿纸。
+   */
+  adoptAnswer: (request: {
+    conversationId: string;
+    question: string;
+    answer: string;
+    providerId: string;
+    modelKey: string;
+  }) => invoke<AdoptedTurn>("adopt_answer", { request }),
   chatApproveTool: (
     requestId: string,
     callId: string,

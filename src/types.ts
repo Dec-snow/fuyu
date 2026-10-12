@@ -96,6 +96,20 @@ export interface AppConfig {
    * 打开后每次提问都会把相关的记忆一并发给模型服务商，所以默认关闭。
    */
   memoryEnabled: boolean;
+  /** 一问多答上次用过的对比目标（面板里随时可改）。 */
+  compareTargets: CompareTarget[];
+}
+
+/** 一问多答里的一个目标。 */
+export interface CompareTarget {
+  providerId: string;
+  modelKey: string;
+}
+
+/** 「采用这条」的结果：写进会话的那两条消息。 */
+export interface AdoptedTurn {
+  userMessageId: string;
+  assistantMessageId: string;
 }
 
 export interface Conversation {

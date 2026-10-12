@@ -4,11 +4,14 @@ import { visibleMessages } from "../lib/chat-state";
 import {
   buildMessage,
   canAddAttachment,
+  canAddDocument,
   decodeText,
+  isOfficeDoc,
   looksBinary,
   MAX_ATTACHMENTS,
   type Attachment,
 } from "../lib/attachments";
+import { api } from "../services/api";
 import { useChat } from "../stores/chat";
 import { useUi } from "../stores/ui";
 import { ModelPicker } from "./ModelPicker";
@@ -155,6 +158,57 @@ export function Composer() {
   const addTextFiles = async (picked: File[]) => {
     const accepted: Attachment[] = [];
     for (const file of picked) {
+      const doc = isOfficeDoc(file.name);
+
+      // Office 文档走**后端解析**这条路：前端解 ZIP+XML 要引一堆库，
+      // 而大小与 zip bomb 上限在后端才能强制执行。
+      if (doc) {
+        // 预检只看个数 / 类型 / 单文件大小；**合计**要等解析完按正文算
+        // （详见 `canAddDocument` 的注释：用文件大小去比 512 KB 的合计上限，
+        //  任何稍大的文档都会被提前拒掉）
+        const pre = canAddDocument([...files, ...accepted], file.name, file.size);
+        if (!pre.ok) {
+          useUi.getState().pushNotice(`「${file.name}」已跳过：${pre.reason}`);
+          continue;
+        }
+        const dataUrl = await fileToDataUrl(file);
+        if (dataUrl === null) {
+          useUi.getState().pushNotice(`「${file.name}」读取失败，已跳过`);
+          continue;
+        }
+        try {
+          const extracted = await api.extractDocument(file.name, dataUrl);
+          const textBytes = new TextEncoder().encode(extracted.text).length;
+          // 提取之后再用**正文大小**复核一次合计上限：文档本身 9 MB，
+          // 但正文会被后端截到 256 KB，计入上下文的应该是正文。
+          const post = canAddAttachment(
+            [...files, ...accepted],
+            file.name,
+            textBytes,
+            "document",
+          );
+          if (!post.ok) {
+            useUi.getState().pushNotice(`「${file.name}」已跳过：${post.reason}`);
+            continue;
+          }
+          accepted.push({
+            name: file.name,
+            text: extracted.text,
+            bytes: textBytes,
+            kind: "document",
+            kindLabel: extracted.kind,
+          });
+          if (extracted.truncated) {
+            useUi
+              .getState()
+              .pushNotice(`「${file.name}」内容过长，已截断到 ${extracted.chars} 字`);
+          }
+        } catch (e) {
+          useUi.getState().pushNotice(`「${file.name}」解析失败：${e}`);
+        }
+        continue;
+      }
+
       const check = canAddAttachment([...files, ...accepted], file.name, file.size);
       if (!check.ok) {
         useUi.getState().pushNotice(`「${file.name}」已跳过：${check.reason}`);
@@ -242,7 +296,7 @@ export function Composer() {
         <ModelPicker />
         <RolePicker />
         {files.length < MAX_ATTACHMENTS ? (
-          <label className="ghost-button file-pick" title="附加文本 / 代码 / 配置文件（也可直接拖进来）">
+          <label className="ghost-button file-pick" title="附加文本 / 代码 / 配置文件，或 Word / Excel / PPT 文档（也可直接拖进来）">
             📄 文件
             <input
               type="file"

@@ -63,11 +63,12 @@
 | **代码高亮** | 40 种语言（Rust / TS / Python / SQL / YAML…），配色走主题变量，深浅两套都配过。走 lowlight 的**语法树**而不是 HTML 字符串 —— 所以代码高亮**一次都不注入 HTML** |
 | **数学公式** | 行内 `$x^2$` 与块级 `$$…$$`，KaTeX 渲染（含 MathML）。价格 `$5 和 $10` 不会被误判成公式。这是全项目**唯一**一处 `dangerouslySetInnerHTML`，见下方说明 |
 | **mermaid 图表** | ` ```mermaid ` 代码块直接画成流程图 / 时序图等。**按需加载**（671 KB 独立 chunk，不用图表就不下载），跟随深浅主题重绘，画不出来时退回显示源码而不是留空白 |
+| **Office 文档解析** | 拖入 `.docx / .xlsx / .pptx`（单文件 9 MB）→ 由 Rust 解 ZIP+XML 提取文字（Word 段落与表格、Excel 多工作表含共享字符串、PPT 分页标注）→ 再当普通附件用。有 zip bomb 防护与 256 KB 正文上限（超了**明确标注**「已截断」，不悄悄丢） |
 
 ## 未实现（留给下一版）
 
 MCP 客户端、本地知识库（BM25）、长期记忆、技能（Skill）、
-文档解析（docx / xlsx / pptx / pdf）、文生图、一问多答、自动更新。
+PDF 解析、文生图、一问多答、自动更新。
 
 这些功能在参考项目里都有实现。作者对参考项目的逐层拆解笔记（含原样摘抄的代码）
 **只保留在本地，没有随本仓库发布**，原因见文末「致谢与来源说明」；
@@ -211,6 +212,14 @@ python tools/check-preview.py dist/preview.png --set=ssr        # 8 项
 python tools/check-preview.py dist/preview-mermaid.png --set=client  # 11 项
 ```
 
+文档解析的测试夹具是**真的 Office 文件**（由 python-docx / openpyxl / python-pptx
+生成，不是手写的 XML 片段）——「我以为格式是这样」和「Office 实际写出来是这样」
+差得很远：
+
+```bash
+<python> tools/make-office-fixtures.py    # 重新生成 src-tauri/tests/fixtures/*
+```
+
 详见 [`tools/`](./tools)。
 
 ```bash
@@ -226,10 +235,10 @@ cd src-tauri && cargo clippy --all-targets -- -D warnings
 
 | 检查 | 结果 |
 |---|---|
-| `cargo test` | **227 passed / 0 failed**（不联网；含真开 TCP 端口的流式 / 抓取 / 搜索集成测试，**真读写系统剪贴板**的往返测试，以及**备份导出→导入**的往返测试） |
+| `cargo test` | **246 passed / 0 failed**（不联网；含真开 TCP 端口的流式 / 抓取 / 搜索集成测试、**真读写系统剪贴板**的往返测试、**备份导出→导入**的往返测试，以及**真 Office 文件**的解析测试） |
 | `cargo clippy --all-targets -- -D warnings` | 通过，0 warning |
 | `cargo fmt --check` | 通过 |
-| `npm test`（vitest） | **230 passed / 0 failed**（含 11 条直接驱动 store 的竞态/接线测试，以及组件级渲染断言） |
+| `npm test`（vitest） | **238 passed / 0 failed**（含 11 条直接驱动 store 的竞态/接线测试，以及组件级渲染断言） |
 | `npm run build`（tsc + vite） | 通过，产物 267 KB JS / 16.4 KB CSS |
 | debug 二进制启动 | 进程存活，无 panic，无 stderr 输出 |
 | **旧版配置兼容** | 用「加字段之前写下的 `providers.json`」启动，进程正常存活（新字段回落默认值） |

@@ -13,9 +13,13 @@ import {
   extensionOf,
   fenceFor,
   isAllowedExtension,
+  isOfficeDoc,
   looksBinary,
   MAX_ATTACHMENT_BYTES,
   MAX_ATTACHMENTS,
+  MAX_DOCUMENT_BYTES,
+  MAX_TOTAL_ATTACHMENT_BYTES,
+  canAddDocument,
   type Attachment,
 } from "./attachments";
 
@@ -137,6 +141,88 @@ describe("canAddAttachment", () => {
     //   会先被 256 KB 的**单文件**上限挡掉，那样测的就不是合计这条规则了。）
     expect(canAddAttachment(existing, "d.md", 100 * 1024).ok).toBe(true);
     expect(canAddAttachment(existing, "e.md", 150 * 1024).ok).toBe(false);
+  });
+});
+
+describe("Office 文档（走后端解析）", () => {
+  it("isOfficeDoc 只认三种扩展名，大小写不敏感", () => {
+    for (const n of ["a.docx", "B.XLSX", "c.pptx"]) {
+      expect(isOfficeDoc(n), n).toBe(true);
+    }
+    for (const n of ["a.txt", "a.pdf", "a.doc", "a.xls", "a.pptx.exe", "docx"]) {
+      expect(isOfficeDoc(n), n).toBe(false);
+    }
+  });
+
+  it("文档按文档的上限判大小，不受 256 KB 文本上限约束", () => {
+    // 拿文本上限去卡 Office 文档会让这个功能完全没法用（一张插图就几 MB）
+    const twoMb = 2 * 1024 * 1024;
+    expect(canAddDocument([], "报告.docx", twoMb).ok).toBe(true);
+    // 同样的字节数按「文本」判会被拒
+    expect(canAddAttachment([], "日志.log", twoMb).ok).toBe(false);
+    // 超过 9 MB 才拒，边界值本身要放行
+    expect(canAddDocument([], "巨大.docx", MAX_DOCUMENT_BYTES + 1).ok).toBe(false);
+    expect(canAddDocument([], "边界.docx", MAX_DOCUMENT_BYTES).ok).toBe(true);
+  });
+
+  it("文档预检**不**套用 512 KB 的合计上限（否则稍大的文档永远加不进去）", () => {
+    // 这条是测试逼出来的真 bug：预检时手里只有文件大小（可达 9 MB），
+    // 若一起过合计上限，任何超过 512 KB 的文档都会被提前拒掉。
+    const twoMb = 2 * 1024 * 1024;
+    expect(canAddDocument([], "报告.docx", twoMb).ok).toBe(true);
+    // 合计上限只在拿到**正文大小**之后才判
+    expect(canAddAttachment([], "报告.docx", 100 * 1024, "document").ok).toBe(true);
+    expect(
+      canAddAttachment([], "报告.docx", MAX_TOTAL_ATTACHMENT_BYTES + 1, "document").ok,
+    ).toBe(false);
+  });
+
+  it("按文档类型加时，非 Office 扩展名会被拒（不能拿文档上限放行任意文件）", () => {
+    const r = canAddDocument([], "木马.exe", 100);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain("docx");
+  });
+
+  it("文档按**提取出来的正文**计入合计（不是文件大小）", () => {
+    // 两个各 200 KB 正文的文档 + 第三个 150 KB → 合计 550 KB > 512 KB 上限
+    const existing: Attachment[] = [
+      { name: "a.docx", text: "x", bytes: 200 * 1024, kind: "document" },
+      { name: "b.docx", text: "x", bytes: 200 * 1024, kind: "document" },
+    ];
+    expect(canAddAttachment(existing, "c.docx", 150 * 1024, "document").ok).toBe(false);
+    expect(canAddAttachment(existing, "c.docx", 100 * 1024, "document").ok).toBe(true);
+  });
+});
+
+describe("attachmentBlock（文档）", () => {
+  it("文档块在标题里说明来源类型，且不给语言标注", () => {
+    const block = attachmentBlock({
+      name: "季度报告.docx",
+      text: "【数据】\n名称\t数量",
+      bytes: 100,
+      kind: "document",
+      kindLabel: "Word 文档",
+    });
+    expect(block).toContain("【附件（Word 文档）：季度报告.docx】");
+    // 不是代码，别在围栏后写 docx —— 高亮会拿它当语言去猜
+    expect(block).not.toContain("```docx");
+  });
+
+  it("没给 kindLabel 时有兜底文案，不会出现「附件（undefined）」", () => {
+    const block = attachmentBlock({
+      name: "a.docx",
+      text: "x",
+      bytes: 1,
+      kind: "document",
+    });
+    expect(block).toContain("【附件（文档）：a.docx】");
+    expect(block).not.toContain("undefined");
+  });
+
+  it("普通文本文件仍然带语言标注（高亮要用）", () => {
+    const block = attachmentBlock(att("main.rs", "fn main() {}"));
+    expect(block).toContain("【附件：main.rs】");
+    expect(block).toContain("```rs");
   });
 });
 

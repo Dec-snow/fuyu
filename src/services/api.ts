@@ -169,6 +169,19 @@ export const api = {
   usageReport: (days?: number) =>
     invoke<UsageReport>("usage_report", { days: days ?? null }),
 
+  // ---- 文档解析
+  //
+  // docx / xlsx / pptx 是 ZIP + XML，前端解要引一堆库；交给 Rust 提取文字，
+  // 而且大小与 zip bomb 上限能在那边强制执行（前端限制拦不住直接调命令的人）。
+  extractDocument: (fileName: string, payload: string) =>
+    invoke<{
+      fileName: string;
+      kind: string;
+      text: string;
+      chars: number;
+      truncated: boolean;
+    }>("extract_document", { fileName, payload }),
+
   // ---- 历史
   listConversations: (limit?: number) =>
     invoke<Conversation[]>("list_conversations", { limit: limit ?? null }),

@@ -11,6 +11,7 @@ mod agent;
 mod api;
 mod commands;
 mod diagnostics;
+mod documents;
 mod errors;
 mod models;
 mod state;
@@ -75,6 +76,8 @@ pub fn run() {
             commands::autostart::started_minimized,
             // ---- 用量与费用
             commands::usage::usage_report,
+            // ---- 文档解析
+            commands::documents::extract_document,
             // ---- 设置
             commands::settings::app_info,
             commands::settings::get_config,

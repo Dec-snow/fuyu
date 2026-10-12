@@ -14,6 +14,23 @@ export const MAX_ATTACHMENTS = 3;
 /** 一次附件合计上限。 */
 export const MAX_TOTAL_ATTACHMENT_BYTES = 512 * 1024;
 
+/** 单个 Office 文档的大小上限（Rust 侧另有 12 MB 的 base64 上限兜着）。 */
+export const MAX_DOCUMENT_BYTES = 9 * 1024 * 1024;
+
+/**
+ * 需要**后端解析**的 Office 文档扩展名。
+ *
+ * 这几个不能像文本文件那样在浏览器里直接读：docx / xlsx / pptx 是 ZIP + XML，
+ * 前端要解就得引一堆库。所以它们走 `extract_document` 命令，由 Rust 提取出
+ * 文字之后再当成普通附件用。
+ */
+export const OFFICE_EXTENSIONS: readonly string[] = ["docx", "xlsx", "pptx"];
+
+/** 是不是需要后端解析的 Office 文档。 */
+export function isOfficeDoc(name: string): boolean {
+  return OFFICE_EXTENSIONS.includes(extensionOf(name));
+}
+
 /**
  * 允许的扩展名（**白名单**）。
  *
@@ -82,33 +99,86 @@ export function decodeText(bytes: Uint8Array): string | null {
 export interface Attachment {
   name: string;
   text: string;
+  /** 计入合计上限的字节数（文本文件是文件大小；文档是**提取出来的正文大小**）。 */
   bytes: number;
+  /**
+   * 来源类型：普通文本文件，还是从 Office 文档里提取出来的。
+   *
+   * 存在的意义是让附件块的标题说清「这是什么」—— 模型看到
+   * `【附件（Word 文档）：报告.docx】` 就知道里面的表格是被拍平过的，
+   * 而不是拿到一段来路不明的文本。
+   */
+  kind?: "text" | "document";
+  /** Office 文档的人类可读类型名（「Word 文档」），由后端返回。 */
+  kindLabel?: string;
 }
 
-/** 能不能再加一个附件；返回拒绝的理由（用于给用户明确提示）。 */
-export function canAddAttachment(
+/**
+ * Office 文档的**预检**：只判个数、类型、单文件大小。
+ *
+ * 为什么不能直接用 [`canAddAttachment`]：那个还会算**合计**上限（512 KB），
+ * 而文档在解析前的「字节数」是文件大小（可以到 9 MB）—— 拿它去比合计，
+ * 任何稍大的文档都会被提前拒掉，功能等于废了。
+ * 合计要等解析完、拿到**正文大小**之后再算（见 `Composer` 里的第二次检查）。
+ */
+export function canAddDocument(
   existing: Attachment[],
   name: string,
-  bytes: number,
+  fileBytes: number,
 ): { ok: true } | { ok: false; reason: string } {
   if (existing.length >= MAX_ATTACHMENTS) {
     return { ok: false, reason: `一次最多 ${MAX_ATTACHMENTS} 个文件` };
   }
-  if (!isAllowedExtension(name)) {
-    const ext = extensionOf(name);
+  if (!isOfficeDoc(name)) {
+    return { ok: false, reason: "只支持 .docx / .xlsx / .pptx 三种文档" };
+  }
+  if (fileBytes > MAX_DOCUMENT_BYTES) {
     return {
       ok: false,
-      reason: ext
-        ? `不支持 .${ext} 这类文件（只支持纯文本 / 代码 / 配置）`
-        : "无法识别这个文件的类型（只支持纯文本 / 代码 / 配置）",
+      reason: `文档太大（${(fileBytes / 1048576).toFixed(1)} MB，上限 ${MAX_DOCUMENT_BYTES / 1048576} MB）`,
     };
   }
-  if (bytes > MAX_ATTACHMENT_BYTES) {
-    return {
-      ok: false,
-      reason: `文件太大（${(bytes / 1024).toFixed(0)} KB，上限 ${MAX_ATTACHMENT_BYTES / 1024} KB）`,
-    };
+  return { ok: true };
+}
+
+/**
+ * 能不能再加一个附件；返回拒绝的理由（用于给用户明确提示）。
+ *
+ * `kind` 决定按哪套大小上限判断：Office 文档本来就大（一张插图就几 MB），
+ * 拿文本文件的 256 KB 去卡它会让这个功能完全没法用。
+ */
+export function canAddAttachment(
+  existing: Attachment[],
+  name: string,
+  bytes: number,
+  kind: "text" | "document" = "text",
+): { ok: true } | { ok: false; reason: string } {
+  if (kind === "document") {
+    // 文档路径：个数 / 类型 / 单文件大小由 canAddDocument 判，
+    // 这里只补**合计**（此时传入的应当是提取出来的正文大小）。
+    const pre = canAddDocument(existing, name, bytes);
+    if (!pre.ok) return pre;
+  } else {
+    if (existing.length >= MAX_ATTACHMENTS) {
+      return { ok: false, reason: `一次最多 ${MAX_ATTACHMENTS} 个文件` };
+    }
+    if (!isAllowedExtension(name)) {
+      const ext = extensionOf(name);
+      return {
+        ok: false,
+        reason: ext
+          ? `不支持 .${ext} 这类文件（只支持纯文本 / 代码 / 配置）`
+          : "无法识别这个文件的类型（只支持纯文本 / 代码 / 配置）",
+      };
+    }
+    if (bytes > MAX_ATTACHMENT_BYTES) {
+      return {
+        ok: false,
+        reason: `文件太大（${(bytes / 1024).toFixed(0)} KB，上限 ${MAX_ATTACHMENT_BYTES / 1024} KB）`,
+      };
+    }
   }
+
   const total = existing.reduce((sum, a) => sum + a.bytes, 0) + bytes;
   if (total > MAX_TOTAL_ATTACHMENT_BYTES) {
     return {
@@ -144,8 +214,13 @@ export function fenceFor(text: string): string {
 /** 一个附件展开成发给模型的文本块。 */
 export function attachmentBlock(att: Attachment): string {
   const fence = fenceFor(att.text);
-  const lang = extensionOf(att.name);
-  return `【附件：${att.name}】\n${fence}${lang}\n${att.text}\n${fence}`;
+  // Office 文档不给语言标注（它不是代码），改在标题里说明来源类型
+  const isDoc = att.kind === "document";
+  const lang = isDoc ? "" : extensionOf(att.name);
+  const title = isDoc
+    ? `【附件（${att.kindLabel ?? "文档"}）：${att.name}】`
+    : `【附件：${att.name}】`;
+  return `${title}\n${fence}${lang}\n${att.text}\n${fence}`;
 }
 
 /**

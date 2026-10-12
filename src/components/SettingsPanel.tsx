@@ -43,6 +43,7 @@ import type {
   KbStats,
   Memory,
   MemoryStats,
+  ProviderView,
   RolePreset,
   SkillPreset,
   UsageReport,
@@ -97,6 +98,58 @@ export function SettingsPanel() {
   );
 }
 
+/**
+ * 文生图的配置：用哪个服务商、哪个模型、多大尺寸。
+ *
+ * **模型名是手填的**，不从服务商的模型列表里选：能聊天的模型列表里通常没有
+ * 画图模型（`gpt-4o` 不是 `gpt-image-1`），把它混进去只会让用户以为
+ * 「列表里有就能画」。所以这里是一行明确的文字输入。
+ */
+function ImageModelField({ providers }: { providers: ProviderView[] }) {
+  const config = useConfig((s) => s.config);
+  const patch = useConfig((s) => s.patch);
+  if (!config) return null;
+
+  return (
+    <div className="field">
+      <span>文生图 —— 输入框旁的「画图」按钮用它</span>
+      <div className="danger-row">
+        <select
+          className="role-picker"
+          value={config.imageProviderId}
+          onChange={(e) => void patch({ imageProviderId: e.target.value })}
+        >
+          <option value="">跟随默认服务商</option>
+          {providers.map((provider) => (
+            <option key={provider.id} value={provider.id}>
+              {provider.name}
+            </option>
+          ))}
+        </select>
+        <input
+          className="kb-title"
+          placeholder="画图模型名，例如 gpt-image-1 / dall-e-3 / cogview-3"
+          value={config.imageModel}
+          onChange={(e) => void patch({ imageModel: e.target.value })}
+        />
+        <input
+          className="kb-title"
+          style={{ maxWidth: 110 }}
+          placeholder="1024x1024"
+          title="尺寸，写成「宽x高」"
+          value={config.imageSize}
+          onChange={(e) => void patch({ imageSize: e.target.value })}
+        />
+      </div>
+      <div className="settings-hint">
+        用的接口是 OpenAI 兼容的 <code>POST /images/generations</code>
+        （智谱、通义、SiliconFlow 等多数服务商都实现了它）。Base URL 与 API Key
+        沿用上面那份配置，不需要另填一套。
+      </div>
+    </div>
+  );
+}
+
 function ModelsTab() {
   const state = useProviders((s) => s.state);
   const store = useProviders();
@@ -115,6 +168,8 @@ function ModelsTab() {
         API Key 保存在 Windows 凭据管理器里，<b>不写入配置文件</b>，也不会回传给界面 ——
         这里只显示「是否已配置」。
       </p>
+
+      <ImageModelField providers={state.providers} />
 
       {state.providers.map((provider) => (
         <div className="provider-card" key={provider.id}>

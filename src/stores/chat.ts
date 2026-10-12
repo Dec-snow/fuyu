@@ -151,6 +151,15 @@ interface ChatStore extends ChatStreamState {
   deleteMessage: (messageId: string) => Promise<void>;
   regenerate: () => Promise<void>;
   retry: (messageId: string) => Promise<void>;
+  /**
+   * 画一张图，并把它写进当前会话。
+   *
+   * 与聊天共用一个「在飞」闸门（`submitting`）：画图期间同样不该再发消息，
+   * 否则用户会看到两条请求抢同一个会话的更新时间。
+   *
+   * 返回 `true` 表示图已经存进会话了。
+   */
+  generateImage: (prompt: string) => Promise<boolean>;
   editAndResend: (messageId: string, newContent: string) => Promise<void>;
   cancel: () => Promise<void>;
   setToolsEnabled: (enabled: boolean) => void;
@@ -690,6 +699,64 @@ export const useChat = create<ChatStore>((set, get) => {
       const last = messages[messages.length - 1];
       if (!last || last.role !== "assistant") return;
       await get().retry(last.id);
+    },
+
+    /**
+     * 画一张图并写进会话。
+     *
+     * 三步：确保有会话 → 让后端向服务商要图（可能要几秒到几十秒）→ 把
+     * 「提问 + 带图回答」一次性写进会话。第三步在后端一个事务里做完，
+     * 所以不会出现「提问写进去了、图没写进去」的中间状态。
+     */
+    generateImage: async (prompt) => {
+      const trimmed = prompt.trim();
+      if (!trimmed) return false;
+
+      // 画图要等，期间不能让用户再发一条 —— 两条请求会抢同一个会话的更新时间
+      if (get().streamingId || get().submitting) {
+        set({ error: "还有一条消息正在发送或生成中，请先等它结束。" });
+        return false;
+      }
+
+      set({ submitting: true, error: null });
+      try {
+        const target = currentTarget();
+        if (!target) {
+          set({ error: "还没有可用的服务商或模型，请先到「设置 → 模型」里配置。" });
+          return false;
+        }
+
+        let convId = get().activeId;
+        if (!convId) {
+          const conv = await api.createConversation(target.providerId, target.modelKey);
+          convId = conv.id;
+          set((s) => ({
+            activeId: conv.id,
+            conversations: [conv, ...s.conversations],
+          }));
+        }
+
+        const image = await api.generateImage(trimmed, null);
+        await api.appendImageTurn({
+          conversationId: convId,
+          prompt: trimmed,
+          image: image.dataUrl,
+          model: image.model,
+        });
+
+        // 重新读一遍会话：图片是后端写进去的，本地没有乐观气泡。
+        //
+        // 这里会**切回**那个会话：用户点了「画图」，他要看的就是这张图。
+        // 生成期间他翻到别处去了，也把他带回来 —— 比让图片悄悄出现在
+        // 另一个会话里更符合预期。
+        await get().selectConversation(convId);
+        return true;
+      } catch (e) {
+        set({ error: `生成图片失败：${e}` });
+        return false;
+      } finally {
+        set({ submitting: false });
+      }
     },
 
     /**

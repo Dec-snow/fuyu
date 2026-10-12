@@ -72,6 +72,7 @@ export function Composer() {
   const areaRef = useRef<HTMLTextAreaElement>(null);
   const send = useChat((s) => s.send);
   const cancel = useChat((s) => s.cancel);
+  const generateImage = useChat((s) => s.generateImage);
   // 技能表读一次就够：解析 `/名字` 要用它
   const skills = useConfig((s) => s.config)?.skills ?? [];
   const regenerate = useChat((s) => s.regenerate);
@@ -423,6 +424,22 @@ export function Composer() {
           }}
         >
           对比
+        </button>
+        <button
+          className="compare-button"
+          title="画一张图（用输入框里的描述）"
+          onClick={() => {
+            if (!text.trim()) {
+              useUi.getState().pushNotice("先在输入框里描述想画什么，再点「画图」");
+              return;
+            }
+            // 画图要等几秒到几十秒；等待期间 `submitting` 会挡住再次发送
+            void generateImage(text).then((ok) => {
+              if (ok) setText("");
+            });
+          }}
+        >
+          画图
         </button>
         {busy ? (
           <button className="send-button stop" onClick={() => void cancel()}>

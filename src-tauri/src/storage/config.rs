@@ -221,6 +221,19 @@ impl ProviderConfig {
     pub fn has_model(&self, key: &str) -> bool {
         self.models.iter().any(|m| m.key == key)
     }
+
+    /// 是不是本机 / 局域网里的服务（Ollama、LM Studio、vLLM…）。
+    ///
+    /// 这类服务通常不校验 Key，所以「没填 Key」不该拦住用户 —— 但这条判断只能
+    /// 用在这里（放开鉴权）。**绝不能**把它当成安全边界：`base_url` 是用户自己
+    /// 填的，一个远程服务完全可以自称 localhost。
+    pub fn is_local_endpoint(&self) -> bool {
+        let base = self.base_url.to_ascii_lowercase();
+        self.id == "ollama"
+            || base.contains("localhost")
+            || base.contains("127.0.0.1")
+            || base.contains("0.0.0.0")
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -297,6 +310,18 @@ pub struct AppConfig {
     /// 技能（一次性任务指令 + 工具白名单）。
     #[serde(default = "Skill::presets")]
     pub skills: Vec<Skill>,
+    /// 文生图用哪个服务商（空 = 跟随默认服务商）。
+    #[serde(default)]
+    pub image_provider_id: String,
+    /// 文生图的模型名（空 = 还没配）。
+    ///
+    /// 刻意不复用 models 列表：能聊天不代表能画图，把两件事混在一起会让
+    /// 用户以为「模型列表里有 gpt-4o 就能画图」。
+    #[serde(default)]
+    pub image_model: String,
+    /// 文生图的尺寸，形如 1024x1024。
+    #[serde(default = "default_image_size")]
+    pub image_size: String,
 }
 
 /// 一问多答里的一个目标（服务商 + 模型）。
@@ -313,6 +338,11 @@ fn default_window_opacity() -> f32 {
 
 fn default_font_size() -> f32 {
     DEFAULT_FONT_SIZE
+}
+
+/// 文生图的默认尺寸。
+fn default_image_size() -> String {
+    crate::api::image::DEFAULT_SIZE.to_string()
 }
 
 impl Default for AppConfig {
@@ -350,6 +380,9 @@ impl Default for AppConfig {
             memory_enabled: false,
             compare_targets: Vec::new(),
             skills: Skill::presets(),
+            image_provider_id: String::new(),
+            image_model: String::new(),
+            image_size: default_image_size(),
         }
     }
 }

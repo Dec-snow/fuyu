@@ -6,12 +6,14 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import type {
+  AdoptedImage,
   AdoptedTurn,
   AppConfig,
   AppInfo,
   CompareTarget,
   Conversation,
   Diagnostics,
+  GeneratedImage,
   KbDocument,
   KbHit,
   KbStats,
@@ -44,6 +46,10 @@ export interface SettingsPatch {
   compareTargets?: CompareTarget[];
   /** 技能列表（整表覆写）。 */
   skills?: SkillPreset[];
+  /** 文生图的服务商 / 模型 / 尺寸。 */
+  imageProviderId?: string;
+  imageModel?: string;
+  imageSize?: string;
   webSearchEndpoint?: string;
   proxyUrl?: string;
   useSystemProxy?: boolean;
@@ -122,6 +128,16 @@ export const api = {
     /** 本次使用的技能（一次性任务指令 + 工具白名单）。 */
     skillId?: string | null;
   }) => invoke<string>("chat_send", { request }),
+  /** 文生图：向服务商的 images/generations 发一次请求。 */
+  generateImage: (prompt: string, size?: string | null) =>
+    invoke<GeneratedImage>("generate_image", { prompt, size: size ?? null }),
+  /** 把生成的图片写进会话（一条提问 + 一条带图的回答，一个事务）。 */
+  appendImageTurn: (request: {
+    conversationId: string;
+    prompt: string;
+    image: string;
+    model: string;
+  }) => invoke<AdoptedImage>("append_image_turn", { request }),
   chatCancel: (requestId: string) =>
     invoke<boolean>("chat_cancel", { requestId }),
   /**

@@ -24,6 +24,8 @@ const api = {
   getConversation: vi.fn(),
   listConversations: vi.fn(),
   deleteConversation: vi.fn(),
+  generateImage: vi.fn(),
+  appendImageTurn: vi.fn(),
 };
 
 vi.mock("../services/api", () => ({ api }));
@@ -322,5 +324,98 @@ describe("结算", () => {
     expect(api.chatSend).toHaveBeenLastCalledWith(
       expect.objectContaining({ skillId: null }),
     );
+  });
+});
+
+describe("文生图", () => {
+  /** 造一个最小可用的图片响应。 */
+  const image = {
+    dataUrl: "data:image/png;base64,QUJD",
+    mime: "image/png",
+    bytes: 3,
+    model: "gpt-image-1",
+    prompt: "一只猫",
+    revisedPrompt: null,
+  };
+
+  it("成功后把「提问 + 带图回答」写进会话，并重新读一次", async () => {
+    api.createConversation.mockResolvedValue(conversation);
+    api.generateImage.mockResolvedValue(image);
+    api.appendImageTurn.mockResolvedValue({
+      userMessageId: "u1",
+      assistantMessageId: "a1",
+    });
+    api.getConversation.mockResolvedValue({ conversation, messages: [] });
+    useChat.setState({
+      activeId: conversation.id,
+      submitting: false,
+      streamingId: null,
+    });
+
+    const ok = await useChat.getState().generateImage("一只猫");
+
+    expect(ok).toBe(true);
+    expect(api.generateImage).toHaveBeenCalledWith("一只猫", null);
+    // 图片数据必须是**后端返回的那份**（本地不拼图、不猜格式）
+    expect(api.appendImageTurn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conversationId: conversation.id,
+        prompt: "一只猫",
+        image: "data:image/png;base64,QUJD",
+        model: "gpt-image-1",
+      }),
+    );
+    // 写完之后要重新读会话，否则界面上看不到新图
+    expect(api.getConversation).toHaveBeenCalledWith(conversation.id);
+    // 收尾必须干净，否则「发送」按钮会一直停在被挡住的状态
+    expect(useChat.getState().submitting).toBe(false);
+  });
+
+  it("没有会话时先建一个再画", async () => {
+    api.createConversation.mockResolvedValue(conversation);
+    api.generateImage.mockResolvedValue(image);
+    api.appendImageTurn.mockResolvedValue({
+      userMessageId: "u1",
+      assistantMessageId: "a1",
+    });
+    api.getConversation.mockResolvedValue({ conversation, messages: [] });
+    useChat.setState({ activeId: null, submitting: false, streamingId: null });
+
+    const ok = await useChat.getState().generateImage("一只猫");
+    expect(ok).toBe(true);
+    expect(api.createConversation).toHaveBeenCalled();
+    expect(api.appendImageTurn).toHaveBeenCalledWith(
+      expect.objectContaining({ conversationId: conversation.id }),
+    );
+  });
+
+  it("生成失败时报错，且**不**往会话里写半条", async () => {
+    api.createConversation.mockResolvedValue(conversation);
+    api.generateImage.mockRejectedValue(new Error("额度用完了"));
+    useChat.setState({
+      activeId: conversation.id,
+      submitting: false,
+      streamingId: null,
+    });
+
+    const ok = await useChat.getState().generateImage("一只猫");
+
+    expect(ok).toBe(false);
+    expect(api.appendImageTurn).not.toHaveBeenCalled();
+    expect(useChat.getState().error).toContain("额度用完了");
+    expect(useChat.getState().submitting).toBe(false);
+  });
+
+  it("空描述不发请求；发送中不让插队", async () => {
+    useChat.setState({ submitting: false, streamingId: null });
+    expect(await useChat.getState().generateImage("   ")).toBe(false);
+    expect(api.generateImage).not.toHaveBeenCalled();
+
+    // 有一轮在飞时画图要被挡住（两条请求会抢同一个会话的更新时间）
+    useChat.setState({ streamingId: "某条在飞的消息" });
+    expect(await useChat.getState().generateImage("一只猫")).toBe(false);
+    expect(api.generateImage).not.toHaveBeenCalled();
+    expect(useChat.getState().error).toContain("正在发送或生成");
+    useChat.setState({ streamingId: null });
   });
 });

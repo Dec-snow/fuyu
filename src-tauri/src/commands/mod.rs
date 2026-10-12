@@ -6,6 +6,7 @@ pub mod compare;
 pub mod diagnostics;
 pub mod documents;
 pub mod history;
+pub mod image;
 pub mod kb;
 pub mod memory;
 pub mod providers;

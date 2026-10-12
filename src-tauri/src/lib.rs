@@ -78,6 +78,9 @@ pub fn run() {
             commands::autostart::started_minimized,
             // ---- 用量与费用
             commands::usage::usage_report,
+            // ---- 文生图
+            commands::image::generate_image,
+            commands::image::append_image_turn,
             // ---- 一问多答
             commands::compare::adopt_answer,
             // ---- 长期记忆

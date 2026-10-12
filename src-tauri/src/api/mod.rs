@@ -1,4 +1,5 @@
 pub mod complete;
+pub mod image;
 pub mod openai;
 pub mod sse;
 pub mod stream_client;

@@ -1334,11 +1334,9 @@ fn resolve_system_prompt(cfg: &AppConfig, request: &ChatSendRequest) -> Option<S
 
 /// 本地服务（Ollama 等）允许不带 Key。
 fn is_keyless_provider(provider: &ProviderConfig) -> bool {
-    let base = provider.base_url.to_ascii_lowercase();
-    provider.id == "ollama"
-        || base.contains("localhost")
-        || base.contains("127.0.0.1")
-        || base.contains("0.0.0.0")
+    // 判断收到 `ProviderConfig` 上，因为文生图那边也要用同一套规则 ——
+    // 两处各写一份迟早会漂移（例如一边认 localhost、一边不认）。
+    provider.is_local_endpoint()
 }
 
 #[cfg(test)]

@@ -100,6 +100,30 @@ export interface AppConfig {
   compareTargets: CompareTarget[];
   /** 技能（一次性任务指令 + 工具白名单）。 */
   skills: SkillPreset[];
+  /** 文生图用哪个服务商（空 = 跟随默认服务商）。 */
+  imageProviderId: string;
+  /** 文生图的模型名（空 = 还没配）。 */
+  imageModel: string;
+  /** 文生图的尺寸，形如 1024x1024。 */
+  imageSize: string;
+}
+
+/** 一次文生图的结果。 */
+export interface GeneratedImage {
+  /** data:image/png;base64,...，直接能放进消息的图片字段。 */
+  dataUrl: string;
+  mime: string;
+  bytes: number;
+  model: string;
+  prompt: string;
+  /** 服务商回写的、它实际用的提示词。 */
+  revisedPrompt: string | null;
+}
+
+/** 把生成的图片写进会话的结果。 */
+export interface AdoptedImage {
+  userMessageId: string;
+  assistantMessageId: string;
 }
 
 /** 技能：一次性的任务指令，只作用于当前这条消息。 */

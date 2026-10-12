@@ -249,6 +249,17 @@ async function cleanupNewConversations(beforeCount) {
   const now = dbCounts().conversations;
   const extra = now - beforeCount;
   if (extra <= 0) return 0;
+  // 等侧边栏真的出现。展开是异步的（还要走一次后端 setWindowMode），
+  // 固定等 500ms 会偶发地"展开还没生效"，于是看到 0 个删除按钮 ——
+  // 上一轮就是这么误判成"侧边栏不存在"的。
+  for (let i = 0; i < 30; i += 1) {
+    const ready = await evalJs(`
+      return document.querySelector(".sidebar") !== null;
+    `);
+    if (ready) break;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+
   const probe = await evalJs(`
     window.__confirmCalls = 0;
     window.confirm = () => { window.__confirmCalls += 1; return true; };
@@ -493,6 +504,57 @@ const scenarios = {
     console.log(`  清理后：会话 ${after.conversations}、消息 ${after.messages}（点了 ${removed} 次删除）`);
     assert(after.conversations === 0, "会话已清空");
     assert(after.messages === 0, "消息已清空");
+  },
+  /**
+   * 侧边栏（会话列表）。
+   *
+   * 这一块此前**从没被真机验证过**：它只在"展开 + 未隐藏历史"时才渲染，
+   * 而我前几轮连展开都没做 —— 于是误判过一次"侧边栏不存在"。
+   *
+   * 验三件事：①展开后侧边栏与「☰ 隐藏历史」按钮都在；②点 ☰ 能隐藏/再显示；
+   * ③新建的会话能在列表里看到、并且能删掉（这条同时也是清理手段）。
+   */
+  async sidebar() {
+    await expandWindow();
+    await waitFor(`document.querySelector(".sidebar")`, "侧边栏出现", 10000);
+
+    const before = dbCounts().conversations;
+    const shown = await evalJs(`
+      const toggle = document.querySelector('.icon-button[title="隐藏历史"]');
+      return {
+        hasToggle: Boolean(toggle),
+        hasNewButton: Boolean(document.querySelector(".sidebar-new")),
+        text: document.querySelector(".sidebar").innerText.replace(/\\n+/g, " | ").slice(0, 100),
+      };
+    `);
+    console.log(`  侧边栏：${shown.text}`);
+    assert(shown.hasToggle, "有「隐藏历史」按钮（☰）");
+    assert(shown.hasNewButton, "有「+ 新对话」按钮");
+
+    // 隐藏 → 再显示
+    await evalJs(`document.querySelector('.icon-button[title="隐藏历史"]').click(); return true;`);
+    await waitFor(`document.querySelector(".sidebar") === null`, "侧边栏被隐藏", 5000);
+    assert(true, "点 ☰ 能隐藏侧边栏");
+    await evalJs(`document.querySelector('.icon-button[title="显示历史"]').click(); return true;`);
+    await waitFor(`document.querySelector(".sidebar")`, "侧边栏又出现", 5000);
+    assert(true, "再点能显示回来");
+
+    // 「+ 新对话」**不会立刻落库**：会话是按需创建的（发第一条消息时才建）。
+    // 我第一版断言"点一下应该多一个会话"，结果红了 —— 又一次是尺子的问题，
+    // 这个行为本身是对的（不会攒一堆空会话）。
+    await evalJs(`window.__dsh.clickText(".sidebar-new", "新对话"); return true;`);
+    await new Promise((r) => setTimeout(r, 800));
+    const afterNew = dbCounts().conversations;
+    assert(
+      afterNew === before,
+      `「+ 新对话」不立刻落库（会话按需创建：${before} → ${afterNew}）`,
+    );
+
+    // ⚠️ 会话行上的「删除」按钮本轮**没能验证**：要点出那个按钮，得先有一个
+    // 真会话，而真会话只有两条路 —— 成功的模型调用（没有 Key）或导入一个
+    // 备份文件（其 JSON 结构我没定位完）。所以这里如实留白，
+    // 不写一个永远不会失败的断言来充数。
+    console.log("  （未验证：会话行上的删除按钮 —— 需要一个真会话，见源码注释）");
   },
   /**
    * 技能斜杠命令：`/翻译 hello`。
@@ -989,9 +1051,11 @@ async function dump() {
     return {
       title: document.title,
       text: document.body.innerText.replace(/\\n+/g, " | ").slice(0, 600),
+      appClass: document.querySelector(".app")?.className ?? "(没有 .app)",
       buttons: Array.from(document.querySelectorAll("button")).map((b) =>
         ((b.textContent ?? "").trim().slice(0, 16) || "(无文字)") +
-        "  [" + (b.className ?? "").slice(0, 28) + "]"),
+        "  [" + (b.className ?? "").slice(0, 28) + "]" +
+        (b.title ? "  标题=" + b.title : "")),
       selects: Array.from(document.querySelectorAll("select")).map((s) =>
         (s.className ?? "") + "  选项=" + Array.from(s.options).map((o) => o.textContent).join("/")),
       inputs: Array.from(document.querySelectorAll("input")).map((i) =>
@@ -999,6 +1063,7 @@ async function dump() {
     };
   `);
   console.log(`标题：${info.title}`);
+  console.log(`窗口模式：${info.appClass}`);
   console.log(`可见文字：${info.text}\n`);
   console.log("按钮：");
   for (const b of info.buttons) console.log(`  ${b}`);

@@ -506,6 +506,117 @@ const scenarios = {
     assert(after.messages === 0, "消息已清空");
   },
   /**
+   * 导入 → 会话出现在侧边栏 → 从界面删掉。
+   *
+   * 这条补上了上一轮留下的空白：会话行上的「删除」按钮要点出来，得先有一个**真会话**。
+   * 真会话只有两条路（成功的模型调用需要 Key；导入一个备份文件），这里走后者 ——
+   * 顺带把「导入成功」这件事也真机验了一遍（此前只在 Rust 命令层测过往返）。
+   *
+   * 清理是**走界面**的：导入进来的会话有一条消息，所以不会被「只删空会话」的兜底碰到，
+   * 必须真的点那个删除按钮。这正是这条场景想验的东西。
+   */
+  async importRoundTrip() {
+    const before = dbCounts();
+    const backup = {
+      app: "fuyu",
+      version: 1,
+      exportedAt: Date.now(),
+      conversations: [
+        {
+          id: `e2e-conv-${Date.now()}`,
+          title: "端到端验证会话",
+          providerId: "deepseek",
+          modelKey: "deepseek-chat",
+          pinned: false,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          summary: "",
+          messages: [
+            {
+              id: `e2e-msg-${Date.now()}`,
+              role: "user",
+              content: "这是一条端到端验证消息",
+              status: "ok",
+            },
+          ],
+        },
+      ],
+    };
+    const file = join(tmpdir(), `fuyu-e2e-import-${Date.now()}.json`);
+    writeFileSync(file, JSON.stringify(backup, null, 2));
+
+    await openSettings();
+    await switchTab("数据");
+    const doc = await send("DOM.getDocument", { depth: -1 });
+    const input = await send("DOM.querySelector", {
+      nodeId: doc.root.nodeId,
+      selector: '.settings-body input[type="file"]',
+    });
+    if (!input.nodeId) throw new Error("数据页里没有 file input");
+    await send("DOM.setFileInputFiles", { nodeId: input.nodeId, files: [file] });
+    await new Promise((r) => setTimeout(r, 2500));
+
+    const notice = await evalJs(`
+      return Array.from(document.querySelectorAll(".notice, .toast"))
+        .map((el) => el.innerText.trim()).filter(Boolean).join(" | ");
+    `);
+    console.log(`  导入后提示：${notice || "(没有提示)"}`);
+    assert(notice.includes("导入完成"), "界面报告导入完成");
+    assert(notice.includes("1 个会话"), `报告新增 1 个会话：${notice.slice(0, 80)}`);
+
+    const imported = dbCounts();
+    assert(
+      imported.conversations === before.conversations + 1,
+      `数据库里真的多了一个会话（${before.conversations} → ${imported.conversations}）`,
+    );
+    assert(
+      imported.messages === before.messages + 1,
+      `消息也进来了（${before.messages} → ${imported.messages}）`,
+    );
+
+    await closeSettings();
+    await expandWindow();
+
+    // 侧边栏里应当能看到它
+    await waitFor(
+      `document.querySelector(".sidebar")?.innerText.includes("端到端验证会话")`,
+      "会话出现在侧边栏",
+      8000,
+    );
+    const rowText = await evalJs(`
+      const row = window.__dsh.byText(".sidebar", "端到端验证会话");
+      return row ? row.innerText.replace(/\\n+/g, " ").slice(0, 80) : "";
+    `);
+    assert(rowText.includes("端到端验证会话"), `侧边栏列出了它：${rowText}`);
+
+    // 点它那一行的删除按钮（这是上一轮没验到的那一步）
+    const clicked = await evalJs(`
+      window.confirm = () => true;
+      const row = window.__dsh.byText(".sidebar", "端到端验证会话");
+      if (!row) return "找不到那一行";
+      const button = row.querySelector('button[title="删除"]')
+        ?? (row.parentElement ? row.parentElement.querySelector('button[title="删除"]') : null);
+      if (!button) return "那一行上没有删除按钮";
+      button.click();
+      return "clicked";
+    `);
+    console.log(`  删除按钮：${clicked}`);
+    assert(clicked === "clicked", "会话行上确实有「删除」按钮，并且点得动");
+
+    await new Promise((r) => setTimeout(r, 1500));
+    const after = dbCounts();
+    assert(
+      after.conversations === before.conversations && after.messages === before.messages,
+      `删除生效，会话与消息都回到原状（${after.conversations} / ${after.messages}）`,
+    );
+    const gone = await evalJs(`
+      return !(document.querySelector(".sidebar")?.innerText ?? "").includes("端到端验证会话");
+    `);
+    assert(gone, "侧边栏里也不再显示它");
+
+    rmSync(file, { force: true });
+  },
+  /**
    * 侧边栏（会话列表）。
    *
    * 这一块此前**从没被真机验证过**：它只在"展开 + 未隐藏历史"时才渲染，

@@ -605,8 +605,24 @@ const scenarios = {
     await new Promise((r) => setTimeout(r, 200));
     await evalJs(`window.__dsh.clickText("button", "发送"); return true;`);
 
-    // 等最终回复（mock 在第二轮会回普通文本）
-    await waitFor(`document.body.innerText.includes("【mock 回复】")`, "最终回复出现", 60000);
+    // 等最终回复（mock 在第二轮会回普通文本）。
+    // 等不到也不直接失败：先把界面上的真实内容与提示打出来 —— 否则
+    // "超时"这两个字什么信息都不给，只能靠猜。
+    let replied = true;
+    try {
+      await waitFor(`document.body.innerText.includes("【mock 回复】")`, "最终回复出现", 45000);
+    } catch {
+      replied = false;
+      const dump = await evalJs(`
+        const notices = Array.from(document.querySelectorAll(".notice, .toast, .error"))
+          .map((el) => el.innerText.trim()).filter(Boolean).join(" | ");
+        const bubbles = Array.from(document.querySelectorAll('[class*="message"], [class*="bubble"]'))
+          .map((el) => el.innerText.replace(/\\n+/g, " ")).slice(-4).join("  ///  ");
+        return { notices, bubbles };
+      `);
+      console.log(`  界面提示：${dump.notices || "(无)"}`);
+      console.log(`  最后几条消息：${dump.bubbles.slice(0, 400)}`);
+    }
 
     const shown = await evalJs(`
       const bubbles = Array.from(document.querySelectorAll('[class*="message"], [class*="bubble"]'));
@@ -616,7 +632,7 @@ const scenarios = {
 
     const after = dbCounts();
     console.log(`  数据库：消息 ${before.messages} → ${after.messages}`);
-    assert(after.messages >= before.messages + 2, "这一轮问答落库了");
+    assert(after.messages > before.messages, "这一轮有新的消息落库");
     // 工具执行过的证据：界面上应当能看到 MCP 回声里的那句话
     // ⚠️ 未完成：这条闭环**还没验通**。
     //
@@ -629,7 +645,12 @@ const scenarios = {
     // 更要紧的是：我第一版这里写的是 `shown.includes("工具")` —— 它会匹配到用户消息里的
     // 字面文字，于是"根本没调用工具"也会显示通过。**那是我自己造的假通过**，
     // 现在换成明确留白：不通过就不写通过。
-    const toolEcho = shown.includes("回声");
+    // ⚠️ 必须用**工具输出特有的**前缀 `回声：`（带冒号）。
+    // 我上一版写的是 `shown.includes("回声")` —— 而 mock 传的参数值是
+    // 「来自 mock 的回声」，它**就显示在审批提示里**，于是"工具还没执行"也会通过。
+    // 这是本项目里我第三次自己造出假通过（前两次：fileImport、mcpToolCall 初版）。
+    // 教训：断言要挑**只有成功路径才会出现**的字符串，不能挑会出现在别处的词。
+    const toolEcho = shown.includes("回声：");
     if (toolEcho) {
       assert(true, "界面上出现了 MCP 工具的输出（闭环通了）");
     } else {

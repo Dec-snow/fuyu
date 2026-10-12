@@ -234,3 +234,31 @@ export function buildMessage(text: string, attachments: Attachment[]): string {
   const blocks = attachments.map(attachmentBlock).join("\n\n");
   return text.trim().length > 0 ? `${blocks}\n\n${text}` : blocks;
 }
+
+/**
+ * 附件 chip 右侧那行文字。
+ *
+ * 文档这里显示的是**提取出来的正文**大小，而不是原文件大小 —— 同一个「KB」在
+ * 两种情况下含义不同，所以必须标出来。不标的两个后果：
+ * - 5 MB 的 PDF 只显示「0.3 KB」，用户以为出错了；
+ * - 「解析出 0 字」（扫描件）与「解析成功」在界面上长得一模一样，
+ *   用户判断不出后端到底读进去没有。
+ */
+export function describeAttachmentSize(file: {
+  bytes: number;
+  kind?: "text" | "document";
+}): string {
+  const kb = (file.bytes / 1024).toFixed(file.bytes < 10240 ? 1 : 0);
+  return file.kind === "document" ? `已解析 ${kb} KB` : `${kb} KB`;
+}
+
+/** 附件 chip 名字上的悬停说明（把「正文」这件事说全）。 */
+export function describeAttachmentTooltip(file: {
+  name: string;
+  bytes: number;
+  kind?: "text" | "document";
+}): string {
+  return file.kind === "document"
+    ? `${file.name}（已提取出正文 ${file.bytes} 字节；原文档的版式与图片不会发给模型）`
+    : `${file.name}（${file.bytes} 字节）`;
+}

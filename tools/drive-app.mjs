@@ -400,10 +400,8 @@ const scenarios = {
       `chip 上是这个文件：${chips.texts[0]?.slice(0, 60)}`,
     );
     // chip 上要能看出"已经解析过了"（字数/类型），否则用户不知道后端到底读没读
-    assert(
-      /\\d+\\s*(字|字符|KB|MB)/.test(chips.texts[0] ?? "") || chips.texts[0].includes("PDF"),
-      `chip 上给出了解析结果信息：${chips.texts[0]?.slice(0, 60)}`,
-    );
+    const chipText = chips.texts[0] ?? "";
+    assert(chipText.includes("已解析"), `chip 标出了「已解析」：${chipText}`);
   },
 };
 

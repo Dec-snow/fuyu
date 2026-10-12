@@ -10,6 +10,8 @@ import {
   buildMessage,
   canAddAttachment,
   decodeText,
+  describeAttachmentSize,
+  describeAttachmentTooltip,
   extensionOf,
   fenceFor,
   isAllowedExtension,
@@ -279,5 +281,31 @@ describe("buildMessage", () => {
     const msg = buildMessage("看这两个", [att("a.rs", "1"), att("b.py", "2")]);
     expect(msg).toContain("【附件：a.rs】");
     expect(msg).toContain("【附件：b.py】");
+  });
+});
+
+describe("附件 chip 上的说明", () => {
+  it("文档标明是「已解析」的正文大小 —— 否则分不清这个 KB 是什么", () => {
+    expect(describeAttachmentSize({ bytes: 102, kind: "document" })).toBe("已解析 0.1 KB");
+    // 同一个数字在两种情况下含义不同，这就是必须标出来的理由
+    expect(describeAttachmentSize({ bytes: 102 })).toBe("0.1 KB");
+    expect(describeAttachmentSize({ bytes: 102, kind: "text" })).toBe("0.1 KB");
+  });
+
+  it("大文件用整数 KB，小文件保留一位小数", () => {
+    expect(describeAttachmentSize({ bytes: 5 * 1024 * 1024 })).toBe("5120 KB");
+    expect(describeAttachmentSize({ bytes: 20 * 1024 })).toBe("20 KB");
+    expect(describeAttachmentSize({ bytes: 500 })).toBe("0.5 KB");
+  });
+
+  it("文档的悬停说明讲清了「版式与图片不会发给模型」", () => {
+    const tip = describeAttachmentTooltip({ name: "报告.pdf", bytes: 102, kind: "document" });
+    expect(tip).toContain("已提取出正文");
+    expect(tip).toContain("版式与图片不会发给模型");
+    expect(describeAttachmentTooltip({ name: "a.txt", bytes: 10 })).toContain("10 字节");
+  });
+
+  it("零字节不会显示成 NaN", () => {
+    expect(describeAttachmentSize({ bytes: 0 })).toBe("0.0 KB");
   });
 });

@@ -6,6 +6,8 @@ import {
   canAddAttachment,
   canAddDocument,
   decodeText,
+  describeAttachmentSize,
+  describeAttachmentTooltip,
   isOfficeDoc,
   looksBinary,
   MAX_ATTACHMENTS,
@@ -361,12 +363,10 @@ export function Composer() {
         <div className="attachment-row">
           {files.map((file, index) => (
             <div className="file-chip" key={`${file.name}-${index}`}>
-              <span className="file-chip-name" title={`${file.name}（${file.bytes} 字节）`}>
+              <span className="file-chip-name" title={describeAttachmentTooltip(file)}>
                 📄 {file.name}
               </span>
-              <span className="file-chip-size">
-                {(file.bytes / 1024).toFixed(file.bytes < 10240 ? 1 : 0)} KB
-              </span>
+              <span className="file-chip-size">{describeAttachmentSize(file)}</span>
               <button
                 className="attachment-remove"
                 title="移除"

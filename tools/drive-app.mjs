@@ -506,6 +506,56 @@ const scenarios = {
     assert(after.messages === 0, "消息已清空");
   },
   /**
+   * 计时诊断：扫描 MCP 到底要多久、卡在哪。
+   *
+   * 与 `mcp` 场景的区别：服务器配置**预先**由外部写进 providers.json
+   * （跳过界面填充那一串补丁），只点一次「重新扫描」，然后每 2 秒采样一次。
+   * 目的不是"通过"，而是把"几乎不返回"这件事量化出来。
+   */
+  async mcpScan() {
+    await openSettings();
+    await switchTab("通用");
+    await waitFor(`document.querySelector(".role-row")`, "已有一个服务器配置", 8000);
+
+    const started = Date.now();
+    await evalJs(`window.__dsh.clickText("button", "重新扫描"); return true;`);
+    console.log("  已点「重新扫描」，开始采样：");
+
+    let found = "";
+    let last = "";
+    for (let i = 0; i < 30; i += 1) {
+      const state = await evalJs(`
+        const field = Array.from(document.querySelectorAll(".field")).find((el) =>
+          (el.innerText ?? "").includes("MCP 服务器"));
+        const area = (field ? field.innerText : "").replace(/\\n+/g, " ");
+        const button = window.__dsh.byText("button", "重新扫描");
+        const notices = Array.from(document.querySelectorAll(".notice, .toast"))
+          .map((el) => el.innerText.trim()).filter(Boolean).join(" | ");
+        return {
+          status: area.includes("已连接") || area.includes("连不上")
+            ? area.slice(area.indexOf("删除") + 2, area.indexOf("删除") + 120)
+            : "",
+          busy: button ? button.textContent.trim() : "(没有按钮)",
+          notices,
+        };
+      `);
+      const line = `状态=${state.status || "(还没出)"} 按钮=${state.busy}${state.notices ? " 提示=" + state.notices.slice(0, 60) : ""}`;
+      if (line !== last) {
+        console.log(`  t=${((Date.now() - started) / 1000).toFixed(1)}s  ${line}`);
+        last = line;
+      }
+      if (state.status) {
+        found = state.status;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+    assert(found.includes("已连接"), `扫描连上了：${found.slice(0, 60) || "(没有结果)"}`);
+    assert(found.includes("2 个工具"), "列出了两个工具");
+    assert(found.includes("mcp__"), "工具名以 mcp__ 开头（能并进模型工具清单的那种名字）");
+    await closeSettings();
+  },
+  /**
    * MCP：在设置里配一个**真的**服务端，扫描，看它拉进程、握手、列工具。
    *
    * 此前这块只在 Rust 集成测试里验过（真拉子进程走完整协议），界面上只验到
@@ -577,6 +627,23 @@ const scenarios = {
       assert((mine.args ?? []).length === 1, "参数存对了（含中文路径也没被拆坏）");
     }
 
+    // 等配置**真的落盘**再点扫描。
+    //
+    // 保存是异步的（补丁在队列里一条条走），而扫描读的是**已保存的**配置 ——
+    // 这是对的行为，但意味着"填完立刻点扫描"会扫到一个还没有这个服务器的配置：
+    // 结果是 0 个服务器，界面上什么都不显示。我为此困惑了两轮：
+    // 一直以为是"node 启动慢"，后来用计时诊断量出来 **2 秒内就有结果**。
+    const ready = () => {
+      const list = readServers();
+      return list.some(
+        (s) => s.command === "node" && (s.args ?? []).some((a) => String(a).includes("fake-mcp-server")),
+      );
+    };
+    for (let i = 0; i < 25 && !ready(); i += 1) {
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    assert(ready(), "配置已经落盘（扫描读的是已保存的配置）");
+
     // 扫描：这一步会真的拉起子进程
     await evalJs(`window.__dsh.clickText("button", "重新扫描"); return true;`);
     // ⚠️ 未完成：点「重新扫描」之后，界面上没有出现「已连接 / 连不上」。
@@ -611,8 +678,9 @@ const scenarios = {
     }
     if (!scanned) {
       console.log(
-        `  ⚠ 未完成：等了 60 秒没等到扫描结果（这台机器首次拉起 node 很慢；` +
-          `此前有一次运行时确实出现了「已连接，提供 2 个工具」）`,
+        "  ⚠ 未完成：这条路径（界面里现填配置 → 立刻扫描）没有出结果；" +
+          "配置本身在磁盘与内存里都是对的，原因未查明。" +
+          "扫描功能本身由 mcpScan 场景验证（预置配置，2 秒内出结果）。",
       );
     }
 
@@ -1368,6 +1436,30 @@ function assert(condition, description) {
   }
 }
 
+/**
+ * `mcpScan` 需要**先**有服务器配置（应用启动时就要读到）。
+ *
+ * 所以由驱动在启动应用**之前**写进 providers.json，跑完再还原 ——
+ * 因为"界面里现填再扫描"那条路目前不出结果（见 mcpScan 的注释）。
+ */
+function seedMcpServer(fixture) {
+  const path = join(homedir(), "AppData", "Roaming", "com.floatai.desktop", "providers.json");
+  const config = JSON.parse(readFileSync(path, "utf8"));
+  const previous = config.mcpServers ?? [];
+  config.mcpServers = [
+    { id: "e2e-scan", name: "扫描验证", command: "node", args: [fixture], env: {}, enabled: true },
+  ];
+  writeFileSync(path, JSON.stringify(config, null, 2), "utf8");
+  return previous;
+}
+
+function restoreMcpServers(previous) {
+  const path = join(homedir(), "AppData", "Roaming", "com.floatai.desktop", "providers.json");
+  const config = JSON.parse(readFileSync(path, "utf8"));
+  config.mcpServers = previous;
+  writeFileSync(path, JSON.stringify(config, null, 2), "utf8");
+}
+
 async function main() {
   if (!existsSync(EXE)) throw new Error(`找不到可执行文件：${EXE}（先 npm run tauri:build）`);
   if (existsSync(STALE)) {
@@ -1375,6 +1467,13 @@ async function main() {
       `发现改名前的旧产物 ${STALE} —— 它已经不更新了，跑它等于验证一个旧程序。请先删掉它。`,
     );
   }
+
+  // mcpScan 需要在应用启动**之前**就把服务器写进配置
+  // 只要这次要跑的场景里包含 mcpScan 就预置（全套跑时也一样）
+  const willRunScan = !ONLY || ONLY === "mcpScan";
+  const seeded = willRunScan
+    ? seedMcpServer(resolve("src-tauri/tests/fixtures/fake-mcp-server.mjs"))
+    : null;
 
   console.log(`启动应用：${EXE}`);
   const child = spawn(EXE, [], {
@@ -1410,7 +1509,11 @@ async function main() {
 
   if (args.dump) {
     await dump();
-    if (!KEEP) child.kill();
+    if (seeded) {
+    restoreMcpServers(seeded);
+    console.log("（已还原 MCP 服务器配置）");
+  }
+  if (!KEEP) child.kill();
     process.exit(0);
   }
 
@@ -1428,6 +1531,10 @@ async function main() {
     }
   }
 
+  if (seeded) {
+    restoreMcpServers(seeded);
+    console.log("（已还原 MCP 服务器配置）");
+  }
   if (!KEEP) child.kill();
   console.log(failures === 0 ? "\n全部通过" : `\n有 ${failures} 项未通过`);
   process.exit(failures === 0 ? 0 : 1);

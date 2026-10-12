@@ -36,7 +36,14 @@ import { useChat } from "../stores/chat";
 import { applyAppearance, previewAppearance, useConfig } from "../stores/config";
 import { useProviders } from "../stores/providers";
 import { blankSkill } from "../lib/skills";
-import { blankMcpServer, describeMcpStatus, validateMcpServer } from "../lib/mcp";
+import {
+  blankMcpServer,
+  describeMcpStatus,
+  formatArgs,
+  mergeServerEdit,
+  parseArgs,
+  validateMcpServer,
+} from "../lib/mcp";
 import { describeAsset, describeUpdate, updateStatus } from "../lib/update";
 import { useUi } from "../stores/ui";
 import type {
@@ -2141,8 +2148,30 @@ function McpSection() {
 
   if (!config) return null;
   const servers = config.mcpServers ?? [];
+  /**
+   * 保存 MCP 服务器列表。
+   *
+   * 这里有个真实的竞态：每次编辑发的都是**整表补丁**，而补丁是按当前渲染出的
+   * `servers` 拼的。用户连着改两个字段（先改名字、再改命令）时，第二次补丁可能
+   * 还在按**旧的**列表拼，于是第一次的修改被覆盖 —— 表现是「我明明填了名字，
+   * 它却变回去了」。（真机验证时我一次填了三个字段，存下来的名字就是旧的。）
+   *
+   * 曾经想过去抖：**那是错的方向** —— 一串连续编辑被合并成一次保存，而那次保存
+   * 用的还是旧列表，前面的编辑会全丢，比原来更糟。
+   *
+   * 正确做法：以 store 里的**最新**列表为基准，把这次相对快照的改动合并进去；
+   * 只搬真正变了的字段，未参与的条目原样保留（见 `mergeServerEdit`）。
+   */
+  // 串行化：三个字段在一次交互里连着改时，三个补丁会**同时在飞**，
+  // 后端按顺序落地、最后一个覆盖前两个 —— 表现就是"只有最后改的那个生效"。
+  // 而且 `latest` 必须在**排队执行时**才读，否则读到的还是前一个补丁落地前的状态。
+  const queue = useRef<Promise<void>>(Promise.resolve());
   const save = (next: McpServerConfig[]) => {
-    void patch({ mcpServers: next }).catch(() => undefined);
+    queue.current = queue.current.then(() => {
+      const latest = useConfig.getState().config?.mcpServers ?? [];
+      const merged = mergeServerEdit(servers, next, latest);
+      return patch({ mcpServers: merged }).catch(() => undefined);
+    });
   };
 
   const scan = async () => {
@@ -2237,13 +2266,13 @@ function McpSection() {
                 />
                 <input
                   className="role-name"
-                  placeholder="参数，用空格分隔（含空格的路径暂不支持）"
-                  value={server.args.join(" ")}
+                  placeholder="参数，用空格分隔；含空格的路径请用引号包起来"
+                  value={formatArgs(server.args)}
                   onChange={(e) =>
                     save(
                       servers.map((s) =>
                         s.id === server.id
-                          ? { ...s, args: e.target.value.split(/\s+/).filter(Boolean) }
+                          ? { ...s, args: parseArgs(e.target.value) }
                           : s,
                       ),
                     )

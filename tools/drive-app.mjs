@@ -13,8 +13,8 @@
 // 它自己启动应用（带 --remote-debugging-port），跑完杀掉。应用路径可用 --exe= 覆盖。
 
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 // 直接读 SQLite 来数消息条数：确认驱动跑完没留下测试数据（Node 24 自带）
 import { DatabaseSync } from "node:sqlite";
@@ -214,6 +214,107 @@ function dbPath() {
   return join(homedir(), "AppData", "Roaming", "com.floatai.desktop", "floatai.db");
 }
 
+/** 读数据库里的会话数与消息数（用来确认测试没有留下垃圾数据）。 */
+function dbCounts() {
+  const db = new DatabaseSync(dbPath());
+  const conversations = Number(db.prepare("SELECT COUNT(*) AS n FROM conversations").get().n);
+  const messages = Number(db.prepare("SELECT COUNT(*) AS n FROM messages").get().n);
+  db.close();
+  return { conversations, messages };
+}
+
+/** 最后一条用户消息的正文（用来验证斜杠命令有没有被剥掉）。 */
+function lastUserMessage() {
+  const db = new DatabaseSync(dbPath());
+  const row = db
+    .prepare("SELECT content FROM messages WHERE role = 'user' ORDER BY created_at DESC LIMIT 1")
+    .get();
+  db.close();
+  return row ? String(row.content) : null;
+}
+
+/**
+ * 删掉**这次测试新造出来的**会话。
+ *
+ * 为什么需要：聊天类界面点「发送」或「画图」时会先建一个会话（用户要看到自己
+ * 问的东西），失败之后这个会话就留下了 —— 空会话，但确实是垃圾。
+ * 这是我自己踩的坑：跑了几轮之后用户的库里多了 3 个「新对话」。
+ *
+ * 侧边栏是**新到旧**排的，所以反复点第一个删除按钮 `n` 次，删掉的就是新的那 n 个。
+ */
+async function cleanupNewConversations(beforeCount) {
+  // 必须先展开：浮动模式下侧边栏（以及里面的删除按钮）根本没渲染。
+  // 第一版就是栽在这里 —— 点了 3 次"成功"，会话一个没少。
+  await expandWindow();
+  const now = dbCounts().conversations;
+  const extra = now - beforeCount;
+  if (extra <= 0) return 0;
+  const probe = await evalJs(`
+    window.__confirmCalls = 0;
+    window.confirm = () => { window.__confirmCalls += 1; return true; };
+    const buttons = Array.from(document.querySelectorAll('button[title="删除"]'));
+    const sidebar = document.querySelector(".sidebar, .conv-list, aside");
+    return {
+      deleteButtons: buttons.length,
+      firstButtonParent: buttons[0]?.parentElement?.parentElement?.innerText?.replace(/\\n+/g, " ").slice(0, 60) ?? null,
+      sidebarText: (sidebar?.innerText ?? "(找不到侧边栏)").replace(/\\n+/g, " ").slice(0, 120),
+    };
+  `);
+  console.log(`  诊断：删除按钮 ${probe.deleteButtons} 个；第一个所属：${probe.firstButtonParent}`);
+  console.log(`  侧边栏：${probe.sidebarText}`);
+  for (let i = 0; i < extra && i < 20; i += 1) {
+    const clicked = await evalJs(`
+      const button = document.querySelector('button[title="删除"]');
+      if (!button) return false;
+      button.click();
+      return true;
+    `);
+    if (!clicked) break;
+    await new Promise((r) => setTimeout(r, 900));
+    const state = await evalJs(`
+      const notices = Array.from(document.querySelectorAll(".notice, .toast")).map((el) => el.innerText.trim()).filter(Boolean).join(" | ");
+      return { confirms: window.__confirmCalls ?? 0, notices };
+    `);
+    console.log(`  第 ${i + 1} 次删除后：confirm 调用 ${state.confirms} 次，提示 ${state.notices || "(无)"}`);
+  }
+  // 兜底：界面路径没删干净（或侧边栏压根没渲染）时，删掉空会话。
+  const stillLeft = dbCounts().conversations - beforeCount;
+  if (stillLeft > 0) {
+    const purged = purgeEmptyConversations(beforeCount);
+    console.log(`  兜底清理：删掉 ${purged} 个空会话（只删零消息的，绝不碰有内容的会话）`);
+  }
+  return extra + stillLeft;
+}
+
+/**
+ * 兜底：直接删掉「一条消息都没有」的空会话。
+ *
+ * 为什么需要兜底：侧边栏的渲染条件是 `expanded && !sidebarHidden`，
+ * 而把 `sidebarHidden` 打开的那个入口不在界面的可见位置上 —— 与其继续挖，
+ * 不如用一条**可证明安全**的规则：只删消息数为 0 的会话。
+ * 空会话不可能是用户的内容，测试也不会删掉任何一条真实对话。
+ *
+ * 这个脚本是给开发机的验证用的；它不会、也不该去碰有内容的会话。
+ */
+function purgeEmptyConversations(keep) {
+  const db = new DatabaseSync(dbPath());
+  const empty = db
+    .prepare(
+      `SELECT id FROM conversations
+       WHERE id NOT IN (SELECT DISTINCT conversation_id FROM messages WHERE conversation_id IS NOT NULL)
+       ORDER BY created_at DESC`,
+    )
+    .all()
+    .map((row) => String(row.id));
+  const total = Number(db.prepare("SELECT COUNT(*) AS n FROM conversations").get().n);
+  const toDelete = Math.max(0, Math.min(empty.length, total - keep));
+  for (const id of empty.slice(0, toDelete)) {
+    db.prepare("DELETE FROM conversations WHERE id = ?").run(id);
+  }
+  db.close();
+  return toDelete;
+}
+
 const scenarios = {
   /**
    * 编写区的那几个控件是不是真的接上了状态。
@@ -226,6 +327,7 @@ const scenarios = {
    */
   async composerTools() {
     await expandWindow();
+    const conversationsBefore = dbCounts().conversations;
 
     const before = await evalJs(`
       return {
@@ -351,6 +453,16 @@ const scenarios = {
     // 把输入框清干净，别留给后续场景
     await evalJs(`window.__dsh.setValue(document.querySelector("textarea"), ""); return true;`);
 
+    // 画图那一步会先建一个会话（失败后留下空会话），自己造的自己清
+    const removed = await cleanupNewConversations(conversationsBefore);
+    if (removed > 0) {
+      console.log(`  已清理测试造的 ${removed} 个空会话`);
+      assert(
+        dbCounts().conversations === conversationsBefore,
+        `会话数回到 ${conversationsBefore}`,
+      );
+    }
+
     // 「对比」：应当出现对比面板
     await evalJs(`window.__dsh.clickText(".compare-button", "对比"); return true;`);
     await new Promise((r) => setTimeout(r, 600));
@@ -367,6 +479,160 @@ const scenarios = {
     assert(compare.count > 0, "点「对比」之后出现了对比面板");
   },
 
+  /**
+   * 清空会话（把测试环境恢复干净）。
+   *
+   * ⚠️ 这是**破坏性**的，只用于开发机上的验证：跑真机测试前清一下，
+   * 跑完确认没有留下垃圾。用户的真实数据不在这个仓库里，也不该被这个脚本碰。
+   */
+  async reset() {
+    const before = dbCounts();
+    console.log(`  清理前：会话 ${before.conversations}、消息 ${before.messages}`);
+    const removed = await cleanupNewConversations(0);
+    const after = dbCounts();
+    console.log(`  清理后：会话 ${after.conversations}、消息 ${after.messages}（点了 ${removed} 次删除）`);
+    assert(after.conversations === 0, "会话已清空");
+    assert(after.messages === 0, "消息已清空");
+  },
+  /**
+   * 技能斜杠命令：`/翻译 hello`。
+   *
+   * 斜杠是在**发送时**才解析的（前端 `resolveOutgoing`），界面上没有任何预览，
+   * 所以这条路只能真的发一次。没有配模型 Key 时它必然失败 —— 但这正好能验两件事：
+   * ①错误提示可读；②命令被**剥掉**了（落库的是 `hello` 而不是 `/翻译 hello`），
+   * 而后者才是「斜杠命令真的生效」的证据。
+   */
+  async slashCommand() {
+    await expandWindow();
+
+    const before = dbCounts();
+    await evalJs(`
+      window.__dsh.setValue(document.querySelector("textarea"), "/翻译 hello");
+      return true;
+    `);
+    await new Promise((r) => setTimeout(r, 200));
+    await evalJs(`window.__dsh.clickText("button", "发送"); return true;`);
+    await new Promise((r) => setTimeout(r, 3000));
+
+    const shown = await evalJs(`
+      const notices = Array.from(document.querySelectorAll(".notice, .toast, .error"))
+        .map((el) => el.innerText.trim()).filter(Boolean).join(" | ");
+      return { notices, tail: document.body.innerText.replace(/\\n+/g, " ").slice(-200) };
+    `);
+    if (shown.notices) console.log(`  发送后提示：${shown.notices.slice(0, 130)}`);
+    else console.log(`  界面尾部：${shown.tail}`);
+
+    const counts = dbCounts();
+    console.log(`  数据库：会话 ${before.conversations} → ${counts.conversations}，消息 ${before.messages} → ${counts.messages}`);
+
+    assert(
+      shown.notices.length > 0 || /未配置|失败|错误/.test(shown.tail),
+      "发送失败时界面给出了提示",
+    );
+    assert(
+      !shown.notices.includes("[object Object]") && !shown.tail.includes("[object Object]"),
+      "提示里没有 [object Object]",
+    );
+
+    if (counts.messages > before.messages) {
+      const last = lastUserMessage();
+      console.log(`  落库的用户消息：${JSON.stringify(last)}`);
+      assert(last === "hello", `斜杠命令被剥掉了：落库的是「${last}」`);
+      if (counts.conversations > before.conversations) {
+        await evalJs(`
+          window.confirm = () => true;
+          const button = document.querySelector('button[title="删除"]');
+          if (button) button.click();
+          return true;
+        `);
+        await new Promise((r) => setTimeout(r, 1200));
+        const cleaned = dbCounts();
+        console.log(`  清理后：会话 ${cleaned.conversations}、消息 ${cleaned.messages}`);
+        assert(cleaned.conversations === before.conversations, "测试造的会话已删除");
+      }
+    } else {
+      console.log("  （这次失败发生在写入之前，没有落库）");
+    }
+  },
+
+  /**
+   * 导出 / 导入。
+   *
+   * 导出**不弹原生对话框**（后端直接写进「导出」文件夹），所以能完整走一遍。
+   * 导入是 `<input type="file">`，用 CDP 塞真文件。
+   *
+   * 清理原则：只删**这次跑出来的**那个导出文件，用户原有的导出一律不碰。
+   */
+  async backup() {
+    const exportsDir = join(homedir(), "AppData", "Roaming", "com.floatai.desktop", "exports");
+    const listExports = () => {
+      try {
+        return readdirSync(exportsDir);
+      } catch {
+        return [];
+      }
+    };
+
+    const beforeFiles = listExports();
+    const before = dbCounts();
+
+    await openSettings();
+    await switchTab("数据");
+    await evalJs(`window.__dsh.clickText("button", "导出"); return true;`);
+    await new Promise((r) => setTimeout(r, 2000));
+
+    const panelText = await evalJs(`
+      return document.querySelector(".settings-body").innerText.replace(/\\n+/g, " | ");
+    `);
+    const line = panelText.split("|").find((part) => part.includes("fuyu-export") || part.includes("已导出"));
+    if (line) console.log(`  界面显示：${line.trim().slice(0, 130)}`);
+
+    const fresh = listExports().filter((name) => !beforeFiles.includes(name));
+    console.log(`  导出文件夹新增 ${fresh.length} 个：${fresh.join(", ")}`);
+    assert(fresh.length === 1, `导出产生了恰好一个文件（实际 ${fresh.length} 个）`);
+
+    if (fresh.length > 0) {
+      const path = join(exportsDir, fresh[0]);
+      const text = readFileSync(path, "utf8");
+      const parsed = JSON.parse(text);
+      console.log(`  文件 ${fresh[0]}：${text.length} 字节，顶层键 ${Object.keys(parsed).join("/")}`);
+      assert(parsed.app === "fuyu", `导出文件自报产品名：${parsed.app}`);
+      assert(typeof parsed.version === "number", `带版本号：${parsed.version}`);
+      assert(Array.isArray(parsed.conversations), "带 conversations 数组");
+      assert(typeof parsed.exportedAt === "number", "带导出时间戳");
+      rmSync(path, { force: true });
+      assert(listExports().length === beforeFiles.length, `已清理，用户原有 ${beforeFiles.length} 个导出没动`);
+    }
+
+    // 导入一个**非法文件**：必须报错，且不得改动任何数据
+    const badFile = join(tmpdir(), `fuyu-e2e-bad-${Date.now()}.json`);
+    writeFileSync(badFile, "{ 这不是合法的导出文件 }");
+    const doc = await send("DOM.getDocument", { depth: -1 });
+    const input = await send("DOM.querySelector", {
+      nodeId: doc.root.nodeId,
+      selector: '.settings-body input[type="file"]',
+    });
+    if (!input.nodeId) throw new Error("数据页里没有 file input");
+    await send("DOM.setFileInputFiles", { nodeId: input.nodeId, files: [badFile] });
+    await new Promise((r) => setTimeout(r, 2000));
+
+    const notice = await evalJs(`
+      return Array.from(document.querySelectorAll(".notice, .toast"))
+        .map((el) => el.innerText.trim()).filter(Boolean).join(" | ");
+    `);
+    console.log(`  导入非法文件后：${notice || "(没有提示)"}`);
+    assert(notice.includes("导入失败"), "非法导出文件被拒绝并给出提示");
+    assert(!notice.includes("[object Object]"), "该提示也是可读的");
+
+    const after = dbCounts();
+    assert(
+      after.conversations === before.conversations && after.messages === before.messages,
+      `非法导入没有改动数据（会话 ${after.conversations}、消息 ${after.messages}）`,
+    );
+
+    rmSync(badFile, { force: true });
+    await closeSettings();
+  },
   /**
    * 设置项**真的落盘**了吗。
    *

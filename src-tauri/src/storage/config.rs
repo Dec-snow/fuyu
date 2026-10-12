@@ -51,6 +51,111 @@ pub struct Role {
     pub builtin: bool,
 }
 
+/// 技能：**一次性的任务指令**，只作用于当前这条消息。
+///
+/// ## 与「角色」的区别（这是它值得单独存在的理由）
+///
+/// |  | 角色 | 技能 |
+/// |---|---|---|
+/// | 作用范围 | 整个会话（绑在会话上） | 只有这一条消息 |
+/// | 回答什么 | 「你是谁」——持久的身份 | 「这次做什么」——一次性的任务 |
+/// | 工具 | 不干预 | **可以指定用哪些工具**（见 `tools`） |
+/// | 触发 | 下拉框选 | 下拉框选 **或 `/名字` 斜杠命令** |
+///
+/// 如果技能只是「能按消息切换的角色」，那它就是角色的一个别名，不该存在。
+/// 真正让它独立的那个能力是 `tools`：**按任务临时收窄或放开工具**——
+/// 「联网调研」需要搜索与抓网页，「纯离线总结」则必须一个联网工具都不给
+/// （数据不外发）。角色管不了这件事，而它恰恰是用户真正在意的那类开关。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Skill {
+    pub id: String,
+    pub name: String,
+    /// 一句话说明它做什么，下拉框与斜杠提示里显示。
+    #[serde(default)]
+    pub description: String,
+    /// 追加到系统提示词的指令。
+    pub prompt: String,
+    /// 这次允许使用的工具名（空 = 不干预，沿用全局设置）。
+    ///
+    /// 只写**名字**，权限判断仍然走原有那套（敏感工具照样要审批、联网工具照样
+    /// 受「本地数据外发」闸门约束）——技能只能收窄或点名，不能绕过策略。
+    #[serde(default)]
+    pub tools: Vec<String>,
+    /// 内置模板：可以改内容，但不能删。
+    #[serde(default)]
+    pub builtin: bool,
+}
+
+impl Skill {
+    /// 内置技能模板。
+    ///
+    /// 挑的都是「一次性任务」而非人设：翻译一段、解释报错、联网查一下、
+    /// 纯离线总结。前两个演示指令，后两个演示**工具白名单**。
+    pub fn presets() -> Vec<Skill> {
+        vec![
+            Skill {
+                id: "builtin-translate".to_string(),
+                name: "翻译".to_string(),
+                description: "把发来的内容翻成另一种语言，只输出译文".to_string(),
+                prompt: "把用户这条消息的内容翻译成自然、地道的目标语言（未说明时按中英互译）。\
+                         只输出译文，不要解释、不要加引号，保留段落结构与代码块。"
+                    .to_string(),
+                tools: Vec::new(),
+                builtin: true,
+            },
+            Skill {
+                id: "builtin-explain-error".to_string(),
+                name: "解释报错".to_string(),
+                description: "看懂一段报错：原因、怎么改、为什么".to_string(),
+                prompt: "用户会发来一段报错或异常。按这个顺序回答：①一句话说清是什么问题；\
+                         ②最可能的原因（按可能性排序，不要罗列所有可能）；③具体怎么改（给出改动后的\
+                         代码或命令）；④如果信息不足以判断，明确说还需要看什么。不要长篇科普。"
+                    .to_string(),
+                tools: Vec::new(),
+                builtin: true,
+            },
+            Skill {
+                id: "builtin-research".to_string(),
+                name: "联网调研".to_string(),
+                description: "先用搜索引擎查，再给带出处的结论".to_string(),
+                prompt: "这是一次调研任务。先用 web_search 查，需要时用 fetch_webpage 读原文，\
+                         然后给出结论。每个关键结论都要标出来源（标题或网址）；\
+                         查不到就说查不到，不要用记忆里可能过时的内容充数。"
+                    .to_string(),
+                tools: vec!["web_search".to_string(), "fetch_webpage".to_string()],
+                builtin: true,
+            },
+            Skill {
+                id: "builtin-offline-summary".to_string(),
+                name: "纯离线总结".to_string(),
+                description: "只用你发来的内容做总结，一个联网工具都不给".to_string(),
+                prompt: "总结用户发来的内容。**只依据这些内容**，不要补充外部知识，\
+                         不要联网。区分「原文明确说的」与「你的推断」，用短句与列表，\
+                         保留关键数字与结论。"
+                    .to_string(),
+                tools: vec!["get_current_time".to_string()],
+                builtin: true,
+            },
+        ]
+    }
+
+    /// 这个技能是否点名了工具。
+    pub fn restricts_tools(&self) -> bool {
+        !self.tools.is_empty()
+    }
+
+    /// 这个技能是否允许某项「能力」。
+    ///
+    /// 目前只有一个能力用它：**长期记忆**。它不是一个工具调用，而是把本地存下来的
+    /// 用户信息**拼进系统提示词**发出去，所以 `tools_for` 那套过滤管不到它 ——
+    /// 「纯离线总结」要真的离线，就必须连记忆注入一起关掉，否则它一边关掉联网
+    /// 工具、一边把用户档案发出去，那才叫自相矛盾。
+    pub fn allows(&self, capability: &str) -> bool {
+        self.tools.iter().any(|t| t == capability)
+    }
+}
+
 impl Role {
     /// 内置人设模板。
     ///
@@ -189,6 +294,9 @@ pub struct AppConfig {
     /// 面板里随时可以改。
     #[serde(default)]
     pub compare_targets: Vec<CompareTarget>,
+    /// 技能（一次性任务指令 + 工具白名单）。
+    #[serde(default = "Skill::presets")]
+    pub skills: Vec<Skill>,
 }
 
 /// 一问多答里的一个目标（服务商 + 模型）。
@@ -241,6 +349,7 @@ impl Default for AppConfig {
             autostart: false,
             memory_enabled: false,
             compare_targets: Vec::new(),
+            skills: Skill::presets(),
         }
     }
 }

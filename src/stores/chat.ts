@@ -79,6 +79,13 @@ interface SubmitParams {
   newImages?: string[];
   /** 发给模型的历史，必须已经包含最后那条用户消息。 */
   history: { id?: string | null; role: string; content: string }[];
+  /**
+   * 这次用哪个技能（一次性任务指令 + 工具白名单）。
+   *
+   * 由输入框解析好再传进来（斜杠命令与下拉框的选择都在那边合成了一个结果）：
+   * store 不该知道 `/翻译` 这种写法，它只负责把结果放进请求。
+   */
+  skillId?: string | null;
 }
 
 interface ChatStore extends ChatStreamState {
@@ -130,7 +137,17 @@ interface ChatStore extends ChatStreamState {
   /** 给会话指定人设（`null` = 用全局系统提示词）。 */
   setConversationRole: (id: string, roleId: string | null) => Promise<void>;
   deleteConversation: (id: string) => Promise<void>;
-  send: (text: string, images?: string[]) => Promise<boolean>;
+  /**
+   * 发一条消息。
+   *
+   * `skillId` 是技能（一次性任务指令）：由输入框把「斜杠命令」与「下拉框选的」
+   * 合成一个结果再传进来 —— store 不认识 `/翻译` 这种写法。
+   */
+  send: (
+    text: string,
+    images?: string[],
+    skillId?: string | null,
+  ) => Promise<boolean>;
   deleteMessage: (messageId: string) => Promise<void>;
   regenerate: () => Promise<void>;
   retry: (messageId: string) => Promise<void>;
@@ -391,6 +408,7 @@ export const useChat = create<ChatStore>((set, get) => {
         maxTokens: config?.maxTokens ?? null,
         enableTools: get().toolsEnabled,
         approvalSessionId: convId,
+        skillId: params.skillId ?? null,
       });
       return true;
     } catch (e) {
@@ -563,7 +581,7 @@ export const useChat = create<ChatStore>((set, get) => {
       await get().refreshConversations();
     },
 
-    send: async (text, images = []) => {
+    send: async (text, images = [], skillId = null) => {
       const trimmed = text.trim();
       // 只贴了图、没写字也是合法的一条消息。
       if (!trimmed && images.length === 0) return false;
@@ -596,7 +614,7 @@ export const useChat = create<ChatStore>((set, get) => {
         return false;
       }
 
-      return submit({ newUserText: trimmed, newImages: images, history });
+      return submit({ newUserText: trimmed, newImages: images, history, skillId });
     },
 
     /**

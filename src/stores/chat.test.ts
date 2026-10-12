@@ -9,6 +9,7 @@
 // - 「重试」在注定发不出去时**不能先删掉旧回答**
 // - 并发闸门是同步的（两次提交只会发一次请求）
 // - 结算只清自己那一轮的气泡，不会误删期间新发起的请求
+// - 技能 id 要真的进到请求里（否则「选了技能」只是界面上的假象）
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -301,5 +302,25 @@ describe("结算", () => {
     expect(useChat.getState().streamingId).toBe(secondStreamingId);
     expect(Object.keys(useChat.getState().routes)).toHaveLength(1);
     expect(useChat.getState().routes[firstRequestId]).toBeUndefined();
+  });
+
+  it("技能 id 真的进到请求里（否则「选了技能」只是界面上的假象）", async () => {
+    api.createConversation.mockResolvedValue(conversation);
+    api.saveUserMessage.mockResolvedValue("m1");
+    api.chatSend.mockResolvedValue("rid");
+
+    await useChat.getState().send("帮我审一下这段代码", [], "mine-review");
+    expect(api.chatSend).toHaveBeenCalledWith(
+      expect.objectContaining({ skillId: "mine-review" }),
+    );
+
+    // 不选技能时要显式传 null（而不是漏掉这个字段）。
+    // 先把上一轮的「在飞」状态清掉 —— 否则并发闸门会直接拦住第二次发送，
+    // 那时断言的是闸门而不是技能字段（这一条我第一次就写错了）。
+    useChat.setState({ streamingId: null, submitting: false, routes: {} });
+    await useChat.getState().send("普通提问");
+    expect(api.chatSend).toHaveBeenLastCalledWith(
+      expect.objectContaining({ skillId: null }),
+    );
   });
 });

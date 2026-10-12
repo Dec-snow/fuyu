@@ -1235,6 +1235,24 @@ textarea {
 
 /* ---- 知识库 ---- */
 
+.skill-picker {
+  max-width: 130px;
+  font-size: 11.5px;
+  border-radius: 7px;
+}
+
+.skill-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.skill-tools-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
 .kb-title {
   flex: 1;
   min-width: 0;

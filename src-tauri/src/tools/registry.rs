@@ -242,12 +242,34 @@ pub fn tool_definitions(availability: ToolAvailability) -> Vec<ToolDefinition> {
     tools
 }
 
+/// 工具清单，按技能的工具白名单过滤。
+///
+/// `whitelist` 为 `None` 表示不限制（沿用全局设置）；为 `Some` 时**只保留**
+/// 名单里的工具。
+///
+/// 一个必须说清的点：白名单**只能收窄，不能放开**。像 `web_search` 这种工具
+/// 没配端点时本来就不下发，技能点名它也不会凭空能用 —— 那只会让模型去调一个
+/// 必然失败的工具，白烧一轮 token（这条原则写在 [`tool_definitions`] 上面）。
+pub fn tools_for(
+    availability: ToolAvailability,
+    whitelist: Option<&[String]>,
+) -> Vec<ToolDefinition> {
+    let tools = tool_definitions(availability);
+    let Some(whitelist) = whitelist else {
+        return tools;
+    };
+    tools
+        .into_iter()
+        .filter(|tool| whitelist.iter().any(|name| name == tool.name))
+        .collect()
+}
+
 /// 把工具转成 OpenAI `tools` 数组。
 ///
 /// 只导出 name / description / parameters —— 策略字段绝不发给模型。
-pub fn to_openai_tools(availability: ToolAvailability) -> Value {
+pub fn to_openai_tools(availability: ToolAvailability, whitelist: Option<&[String]>) -> Value {
     Value::Array(
-        tool_definitions(availability)
+        tools_for(availability, whitelist)
             .iter()
             .map(|tool| {
                 json!({
@@ -290,6 +312,14 @@ pub struct ToolContext {
     pub knowledge_base: Option<crate::storage::database::Database>,
     /// 长期记忆的句柄（没打开长期记忆时为 `None`）。
     pub memory: Option<crate::storage::database::Database>,
+    /// 本次允许使用的工具名（`None` = 不限制）。
+    ///
+    /// **执行时也要按它拦住**，不能只在清单里过滤：清单只是「模型能看到什么」，
+    /// 模型完全可能凭名字硬调一个没下发的工具。对「纯离线总结」这种技能来说，
+    /// 被硬调一次 `web_search` 就意味着数据发出去了 —— 那是这个技能存在的
+    /// 全部意义所在，所以必须在服务端拦住（与文档解析的上限同一个道理：
+    /// 前端的限制拦不住直接调命令的人）。
+    pub allowed: Option<Vec<String>>,
 }
 
 /// 执行一个工具。`args` 是模型给的参数（已经过 JSON 解析）。
@@ -297,6 +327,15 @@ pub struct ToolContext {
 /// 声明成 `async` 是因为联网工具要发网络请求；纯本地工具在里面只是不
 /// `.await` 而已，代价可以忽略。
 pub async fn execute(name: &str, args: &Value, ctx: &ToolContext) -> ToolResult {
+    // 技能白名单在这里也要拦一道（理由见 `ToolContext::allowed`）
+    if let Some(allowed) = &ctx.allowed {
+        if !allowed.iter().any(|n| n == name) {
+            return ToolResult::error(format!(
+                "当前技能没有开启「{name}」这个工具，不要改用别的途径绕过它"
+            ));
+        }
+    }
+
     let proxy = ctx.proxy_url.as_deref();
     match name {
         "get_current_time" => get_current_time(),
@@ -558,6 +597,7 @@ mod tests {
             proxy_url: None,
             knowledge_base: None,
             memory: None,
+            allowed: None,
         }
     }
 
@@ -658,6 +698,7 @@ mod tests {
             proxy_url: None,
             knowledge_base: Some(db),
             memory: None,
+            allowed: None,
         };
         let result = execute(
             "search_knowledge_base",
@@ -717,6 +758,7 @@ mod tests {
             proxy_url: None,
             knowledge_base: None,
             memory: Some(db.clone()),
+            allowed: None,
         };
 
         let first = execute(
@@ -748,8 +790,71 @@ mod tests {
     }
 
     #[test]
+    fn a_whitelist_keeps_only_the_named_tools() {
+        let allow = vec!["calculator".to_string(), "get_current_time".to_string()];
+        let names: Vec<&str> = tools_for(ToolAvailability::all(), Some(&allow))
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        assert_eq!(names, vec!["get_current_time", "calculator"]);
+        assert!(!names.contains(&"web_search"));
+        assert!(!names.contains(&"read_clipboard_text"));
+    }
+
+    #[test]
+    fn a_whitelist_cannot_unlock_a_tool_that_is_not_available() {
+        // 「联网调研」技能点名了 web_search，但用户根本没配搜索端点 ——
+        // 此时不能凭空把它放出去：模型会去调一个必然失败的工具，白烧一轮 token。
+        let allow = vec!["web_search".to_string()];
+        let off = ToolAvailability {
+            web_search: false,
+            knowledge_base: false,
+            memory: false,
+        };
+        let names: Vec<&str> = tools_for(off, Some(&allow))
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        assert!(names.is_empty(), "白名单只能收窄，不能放开：{names:?}");
+
+        // 配了端点就该出现
+        let on = ToolAvailability {
+            web_search: true,
+            ..off
+        };
+        let names: Vec<&str> = tools_for(on, Some(&allow))
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        assert_eq!(names, vec!["web_search"]);
+    }
+
+    #[tokio::test]
+    async fn execute_refuses_a_tool_outside_the_whitelist() {
+        // 这是「纯离线总结」技能成立的前提：清单只是「模型能看到什么」，
+        // 模型完全可以凭名字硬调一个没下发的工具。被硬调一次 web_search
+        // 就意味着数据发出去了 —— 所以执行时也要拦。
+        let scoped = ToolContext {
+            search_endpoint: None,
+            proxy_url: None,
+            knowledge_base: None,
+            memory: None,
+            allowed: Some(vec!["calculator".to_string()]),
+        };
+
+        let blocked = execute("get_current_time", &json!({}), &scoped).await;
+        assert!(blocked.is_error, "名单外的工具必须被拒");
+        assert!(blocked.content.contains("没有开启"), "{}", blocked.content);
+
+        // 名单内的照常能跑
+        let allowed = execute("calculator", &json!({ "expression": "6 * 7" }), &scoped).await;
+        assert!(!allowed.is_error, "{}", allowed.content);
+        assert!(allowed.content.contains("42"));
+    }
+
+    #[test]
     fn openai_tools_never_leak_policy_fields() {
-        let tools = to_openai_tools(ToolAvailability::all());
+        let tools = to_openai_tools(ToolAvailability::all(), None);
         let serialized = serde_json::to_string(&tools).unwrap();
         assert!(serialized.contains("\"name\""));
         assert!(!serialized.contains("sensitive"), "策略字段绝不能发给模型");

@@ -72,6 +72,12 @@ pub struct ChatSendRequest {
     /// 一个 scope，即使应用没重启，也不会沿用旧会话的授权。
     #[serde(default)]
     pub approval_session_id: Option<String>,
+    /// 本次使用的技能 id（一次性任务指令 + 工具白名单）。
+    ///
+    /// 放在请求里而不是绑在会话上，正是因为技能是**一次性**的：
+    /// 同一个会话里这一条用「联网调研」、下一条用「纯离线总结」是正常用法。
+    #[serde(default)]
+    pub skill_id: Option<String>,
 }
 
 /// 模型请求的一次工具调用（原生 function calling 的累积结果）。

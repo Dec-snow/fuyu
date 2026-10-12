@@ -21,7 +21,7 @@ import {
   previewText,
   titleFromFileName,
 } from "../lib/kb";
-import { toolLabel } from "../lib/tools";
+import { KNOWN_TOOL_NAMES, toolLabel } from "../lib/tools";
 import {
   barWidth,
   formatCost,
@@ -34,6 +34,7 @@ import { api } from "../services/api";
 import { useChat } from "../stores/chat";
 import { applyAppearance, previewAppearance, useConfig } from "../stores/config";
 import { useProviders } from "../stores/providers";
+import { blankSkill } from "../lib/skills";
 import { useUi } from "../stores/ui";
 import type {
   Diagnostics,
@@ -43,6 +44,7 @@ import type {
   Memory,
   MemoryStats,
   RolePreset,
+  SkillPreset,
   UsageReport,
 } from "../types";
 import { CopyButton } from "./CopyButton";
@@ -778,6 +780,144 @@ function RoleEditor() {
   );
 }
 
+/**
+ * 技能编辑器。
+ *
+ * 与角色编辑器并排放在「对话」页，因为两者都是「换个说法让模型干不同的事」——
+ * 但它们的差别要在这里说清楚（用户最容易混的就是这两个）：
+ * 角色跟着**会话**走，技能只作用于**下一条消息**，而且技能能指定用哪些工具。
+ *
+ * 工具那一栏刻意做成**勾选已知工具**而不是自由输入：写错一个名字的后果很隐蔽
+ * （技能看起来正常，但那个工具永远不生效），后端虽然会报错，但在界面上根本
+ * 不给你写错的机会更好。
+ */
+function SkillEditor() {
+  const config = useConfig((s) => s.config);
+  const patch = useConfig((s) => s.patch);
+  const pushNotice = useUi((s) => s.pushNotice);
+  if (!config) return null;
+
+  const skills = config.skills ?? [];
+  const save = (next: SkillPreset[]) => {
+    void patch({ skills: next }).catch(() => undefined);
+  };
+  const knownTools = KNOWN_TOOL_NAMES;
+
+  return (
+    <div className="field">
+      <span>
+        技能 —— 一次性的任务指令，在输入框里选或直接打 <code>/名字</code>；
+        还可以指定这条消息能用哪些工具
+      </span>
+      <div className="role-editor">
+        {skills.map((skill) => (
+          <div className="role-row" key={skill.id}>
+            <div className="role-row-head">
+              <input
+                className="role-name"
+                value={skill.name}
+                onChange={(e) =>
+                  save(
+                    skills.map((s) =>
+                      s.id === skill.id ? { ...s, name: e.target.value } : s,
+                    ),
+                  )
+                }
+                onBlur={() => {
+                  if (skill.name.trim() === "") {
+                    pushNotice("技能名字不能为空");
+                    save(
+                      skills.map((s) =>
+                        s.id === skill.id ? { ...s, name: "未命名技能" } : s,
+                      ),
+                    );
+                  }
+                }}
+              />
+              {skill.builtin ? (
+                <span className="role-tag">内置</span>
+              ) : (
+                <button
+                  className="role-delete"
+                  title="删除这个技能"
+                  onClick={() => {
+                    if (window.confirm(`删除技能「${skill.name}」？`)) {
+                      save(skills.filter((s) => s.id !== skill.id));
+                    }
+                  }}
+                >
+                  删除
+                </button>
+              )}
+            </div>
+            <input
+              className="role-name"
+              placeholder="一句话说明它做什么（会显示在输入框的提示里）"
+              value={skill.description}
+              onChange={(e) =>
+                save(
+                  skills.map((s) =>
+                    s.id === skill.id ? { ...s, description: e.target.value } : s,
+                  ),
+                )
+              }
+            />
+            <DebouncedTextarea
+              value={skill.prompt}
+              rows={3}
+              onCommit={(next) => {
+                if (next.trim() === "") {
+                  pushNotice(`技能「${skill.name}」的指令不能为空`);
+                  return;
+                }
+                save(
+                  skills.map((s) => (s.id === skill.id ? { ...s, prompt: next } : s)),
+                );
+              }}
+            />
+            <div className="skill-tools">
+              <span className="settings-hint">
+                {skill.tools.length === 0
+                  ? "工具：不干预（沿用上面的工具开关）"
+                  : `工具：只用 ${skill.tools.join("、")}`}
+              </span>
+              <div className="skill-tools-list">
+                {knownTools.map((tool) => (
+                  <label className="compare-chip" key={tool}>
+                    <input
+                      type="checkbox"
+                      checked={skill.tools.includes(tool)}
+                      onChange={() =>
+                        save(
+                          skills.map((s) =>
+                            s.id === skill.id
+                              ? {
+                                  ...s,
+                                  tools: s.tools.includes(tool)
+                                    ? s.tools.filter((t) => t !== tool)
+                                    : [...s.tools, tool],
+                                }
+                              : s,
+                          ),
+                        )
+                      }
+                    />
+                    <span>{toolLabel(tool)}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          </div>
+        ))}
+
+        <button className="ghost-button" onClick={() => save([...skills, blankSkill()])}>
+          + 新增技能
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function AppearanceTab() {
   const config = useConfig((s) => s.config);
   const patch = useConfig((s) => s.patch);
@@ -856,6 +996,8 @@ function AppearanceTab() {
       </label>
 
       <RoleEditor />
+
+      <SkillEditor />
 
       <label className="field">
         <span>temperature（{config.temperature.toFixed(1)}）—— 越高回答越发散</span>

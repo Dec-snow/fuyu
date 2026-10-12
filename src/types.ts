@@ -98,6 +98,20 @@ export interface AppConfig {
   memoryEnabled: boolean;
   /** 一问多答上次用过的对比目标（面板里随时可改）。 */
   compareTargets: CompareTarget[];
+  /** 技能（一次性任务指令 + 工具白名单）。 */
+  skills: SkillPreset[];
+}
+
+/** 技能：一次性的任务指令，只作用于当前这条消息。 */
+export interface SkillPreset {
+  id: string;
+  name: string;
+  description: string;
+  /** 追加到系统提示词的指令。 */
+  prompt: string;
+  /** 这次允许使用的工具名（空 = 不干预，沿用全局设置）。 */
+  tools: string[];
+  builtin: boolean;
 }
 
 /** 一问多答里的一个目标。 */

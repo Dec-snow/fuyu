@@ -12,11 +12,14 @@ import {
   type Attachment,
 } from "../lib/attachments";
 import { api } from "../services/api";
+import { resolveOutgoing } from "../lib/skills";
+import { useConfig } from "../stores/config";
 import { useCompare } from "../stores/compare";
 import { useChat } from "../stores/chat";
 import { useUi } from "../stores/ui";
 import { ModelPicker } from "./ModelPicker";
 import { RolePicker } from "./RolePicker";
+import { SkillPicker } from "./SkillPicker";
 
 /** 一条消息最多几张图。与后端 `commands/history.rs` 的常量保持一致。 */
 const MAX_IMAGES = 4;
@@ -61,12 +64,16 @@ export function Composer() {
   const [text, setText] = useState("");
   /** 待发送的图片（data URL）。 */
   const [attachments, setAttachments] = useState<string[]>([]);
+  /** 这次用什么技能（一次性，发完就清）。 */
+  const [pendingSkillId, setPendingSkillId] = useState<string | null>(null);
   /** 待发送的文本类文件（内容已经读成字符串）。 */
   const [files, setFiles] = useState<Attachment[]>([]);
   const [dragging, setDragging] = useState(false);
   const areaRef = useRef<HTMLTextAreaElement>(null);
   const send = useChat((s) => s.send);
   const cancel = useChat((s) => s.cancel);
+  // 技能表读一次就够：解析 `/名字` 要用它
+  const skills = useConfig((s) => s.config)?.skills ?? [];
   const regenerate = useChat((s) => s.regenerate);
   const toolsEnabled = useChat((s) => s.toolsEnabled);
   const setToolsEnabled = useChat((s) => s.setToolsEnabled);
@@ -256,16 +263,23 @@ export function Composer() {
     // 不需要给数据库加字段。
     const value = buildMessage(text, files);
     const images = attachments;
+
+    // 技能：斜杠命令与下拉框的选择合成为一个结果（见 `lib/skills.ts`）。
+    // 放在这里而不是 store 里：`/翻译` 是输入框的语法，store 不该认识它。
+    const outgoing = resolveOutgoing(text, skills, pendingSkillId);
+
     // **确认发出去了才清空草稿。**
     //
     // 以前是先清再发：后端一旦拒收（图片格式不对、还没配 API Key、
     // 历史超过 200 条…），用户辛苦打的字和贴的图一起消失，
     // 而提示还可能在别的地方 —— 他连「为什么没了」都不知道。
-    const accepted = await send(value, images);
+    const accepted = await send(outgoing.text === text ? value : outgoing.text, images, outgoing.skillId);
     if (accepted) {
       setText("");
       setAttachments([]);
       setFiles([]);
+      // 技能是一次性的：用掉就清掉，否则下一条消息会莫名其妙继续用它
+      setPendingSkillId(null);
     }
   };
 
@@ -306,6 +320,7 @@ export function Composer() {
     >
       <div className="composer-toolbar">
         <ModelPicker />
+        <SkillPicker value={pendingSkillId} onChange={setPendingSkillId} />
         <RolePicker />
         {files.length < MAX_ATTACHMENTS ? (
           <label className="ghost-button file-pick" title="附加文本 / 代码 / 配置文件，或 Word / Excel / PPT 文档（也可直接拖进来）">

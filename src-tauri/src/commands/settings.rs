@@ -6,8 +6,8 @@ use tauri::State;
 use crate::errors::{AppError, AppResult};
 use crate::models::config::AppInfo;
 use crate::storage::config::{
-    AppConfig, CompareTarget, ConfigStore, ProviderConfig, Role, MAX_FONT_SIZE, MIN_FONT_SIZE,
-    MIN_WINDOW_OPACITY,
+    AppConfig, CompareTarget, ConfigStore, ProviderConfig, Role, Skill, MAX_FONT_SIZE,
+    MIN_FONT_SIZE, MIN_WINDOW_OPACITY,
 };
 use crate::storage::database::Database;
 
@@ -66,6 +66,8 @@ pub struct SettingsPatch {
     pub memory_enabled: Option<bool>,
     /// 一问多答的对比目标（整表覆写，与 roles 同一个思路）。
     pub compare_targets: Option<Vec<CompareTarget>>,
+    /// 技能列表（整表覆写）。
+    pub skills: Option<Vec<Skill>>,
 }
 
 /// 角色数量上限。
@@ -75,9 +77,65 @@ pub struct SettingsPatch {
 /// 一问多答最多几个模型。与前端 lib/compare.ts 的 MAX_COMPARE_TARGETS 对齐。
 const MAX_COMPARE_TARGETS: usize = 4;
 
+/// 技能数量上限。
+const MAX_SKILLS: usize = 50;
+
 const MAX_ROLES: usize = 50;
 /// 单个角色提示词的长度上限（字符数）。
 const MAX_ROLE_PROMPT_CHARS: usize = 4_000;
+
+/// 规整技能列表。
+///
+/// 与 `sanitize_roles` 的差别只有一处：技能带工具白名单，而白名单里的名字必须是
+/// **真的存在的工具**。写错一个名字的后果很隐蔽 —— 技能看起来正常，但那个工具
+/// 永远不生效（清单被过滤掉了），用户只会觉得「开了也没用」。所以这里**报错**
+/// 而不是静默丢掉，并且在消息里说清是哪个名字不认识。
+fn sanitize_skills(skills: Vec<Skill>) -> AppResult<Vec<Skill>> {
+    if skills.len() > MAX_SKILLS {
+        return Err(AppError::invalid(format!("技能最多 {MAX_SKILLS} 个")));
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(skills.len());
+    for mut skill in skills {
+        skill.id = skill.id.trim().to_string();
+        skill.name = skill.name.trim().to_string();
+        skill.prompt = skill.prompt.trim().to_string();
+        skill.description = skill.description.trim().to_string();
+        skill.tools = skill
+            .tools
+            .iter()
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .collect();
+
+        if skill.id.is_empty() {
+            return Err(AppError::invalid("技能 id 不能为空"));
+        }
+        if skill.name.is_empty() {
+            return Err(AppError::invalid("技能名字不能为空"));
+        }
+        if skill.prompt.is_empty() {
+            return Err(AppError::invalid(format!(
+                "技能「{}」的指令不能为空",
+                skill.name
+            )));
+        }
+        if !seen.insert(skill.id.clone()) {
+            return Err(AppError::invalid(format!("技能 id 重复：{}", skill.id)));
+        }
+        for tool in &skill.tools {
+            if crate::tools::registry::find(tool).is_none() {
+                return Err(AppError::invalid(format!(
+                    "技能「{}」里有一个不存在的工具名：{tool}",
+                    skill.name
+                )));
+            }
+        }
+        out.push(skill);
+    }
+    Ok(out)
+}
 
 /// 规整对比目标：去空、去重、丢掉已经不存在的服务商、夹到上限。
 ///
@@ -292,6 +350,9 @@ pub async fn update_settings(
         if let Some(targets) = patch.compare_targets {
             cfg.compare_targets = sanitize_compare_targets(targets, &cfg.providers);
         }
+        if let Some(skills) = patch.skills {
+            cfg.skills = sanitize_skills(skills)?;
+        }
         // 改完代理立刻重建 HTTP 客户端，否则要重启才生效。
         Ok(cfg.clone())
     })
@@ -363,6 +424,109 @@ mod tests {
             prompt: prompt.to_string(),
             builtin: false,
         }
+    }
+
+    // ---------------- 技能
+
+    fn skill(id: &str, name: &str, prompt: &str) -> Skill {
+        Skill {
+            id: id.to_string(),
+            name: name.to_string(),
+            description: String::new(),
+            prompt: prompt.to_string(),
+            tools: Vec::new(),
+            builtin: false,
+        }
+    }
+
+    #[test]
+    fn a_sane_skill_list_passes_and_gets_trimmed() {
+        let mut s = skill(" s1 ", "  翻译 ", "  把内容翻成英文  ");
+        s.tools = vec![" calculator ".to_string(), " ".to_string()];
+        let out = sanitize_skills(vec![s]).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].id, "s1");
+        assert_eq!(out[0].name, "翻译");
+        assert_eq!(out[0].prompt, "把内容翻成英文");
+        // 工具名去空格、空项丢掉
+        assert_eq!(out[0].tools, vec!["calculator".to_string()]);
+    }
+
+    #[test]
+    fn a_skill_without_name_or_prompt_is_rejected() {
+        assert!(sanitize_skills(vec![skill("s1", "  ", "有指令")])
+            .unwrap_err()
+            .message
+            .contains("名字"));
+        assert!(sanitize_skills(vec![skill("s1", "名字", "  ")])
+            .unwrap_err()
+            .message
+            .contains("指令"));
+        // 重复 id 会让「按 id 找技能」变得不确定
+        let dup = vec![skill("same", "A", "x"), skill("same", "B", "y")];
+        assert!(sanitize_skills(dup).unwrap_err().message.contains("重复"));
+    }
+
+    #[test]
+    fn an_unknown_tool_name_in_a_skill_is_rejected_loudly() {
+        // 静默丢掉一个拼错的工具名，后果很隐蔽：技能看起来正常，但那个工具
+        // 永远不生效（清单被过滤掉了），用户只会觉得「开了也没用」。
+        let mut s = skill("s1", "调研", "先搜索再回答");
+        s.tools = vec!["web_seach".to_string()]; // 故意拼错
+        let err = sanitize_skills(vec![s]).unwrap_err();
+        assert!(err.message.contains("web_seach"), "{}", err.message);
+        assert!(
+            err.message.contains("调研"),
+            "要说清是哪个技能：{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn too_many_skills_are_rejected() {
+        let many = (0..=MAX_SKILLS)
+            .map(|i| skill(&format!("s{i}"), &format!("技能{i}"), "指令"))
+            .collect();
+        assert!(sanitize_skills(many).unwrap_err().message.contains("最多"));
+    }
+
+    #[test]
+    fn the_builtin_skill_presets_themselves_are_valid() {
+        // 预设本身必须能过自己的校验 —— 否则「恢复默认」会直接报错
+        let presets = Skill::presets();
+        let out = sanitize_skills(presets.clone()).unwrap();
+        assert_eq!(out.len(), presets.len());
+        for preset in &presets {
+            for tool in &preset.tools {
+                assert!(
+                    crate::tools::registry::find(tool).is_some(),
+                    "内置技能「{}」引用了不存在的工具 {tool}",
+                    preset.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn only_the_intended_skills_restrict_tools() {
+        // 「联网调研」与「纯离线总结」靠白名单做事，另外两个不该干预工具
+        let presets = Skill::presets();
+        let research = presets.iter().find(|s| s.id == "builtin-research").unwrap();
+        assert!(research.restricts_tools() && research.allows("web_search"));
+        let offline = presets
+            .iter()
+            .find(|s| s.id == "builtin-offline-summary")
+            .unwrap();
+        assert!(offline.restricts_tools());
+        assert!(
+            !offline.allows("web_search") && !offline.allows("fetch_webpage"),
+            "「纯离线」绝不能给联网工具"
+        );
+        let translate = presets
+            .iter()
+            .find(|s| s.id == "builtin-translate")
+            .unwrap();
+        assert!(!translate.restricts_tools(), "翻译不该干预工具选择");
     }
 
     #[test]

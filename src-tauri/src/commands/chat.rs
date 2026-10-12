@@ -24,7 +24,7 @@ use crate::state::{
     AppState, ApprovalScope, ApprovalVerdict, PendingToolApproval, PendingToolApprovals,
     SessionToolApprovals,
 };
-use crate::storage::config::{AppConfig, ConfigStore, ProviderConfig};
+use crate::storage::config::{AppConfig, ConfigStore, ProviderConfig, Skill};
 use crate::storage::database::{Database, DEFAULT_CONVERSATION_TITLE};
 use crate::storage::{new_id, secrets};
 use crate::tools::registry::{self, ToolDefinition};
@@ -84,16 +84,32 @@ pub async fn chat_send(
     let provider = provider
         .ok_or_else(|| AppError::invalid(format!("找不到服务商：{}", request.provider_id)))?;
 
+    // 技能：一次性的任务指令，追加到系统提示词。
+    //
+    // 找不到（用户删了这个技能）就当作没选 —— 静默回落而不是报错：技能是一次性的
+    // 装饰，不该因为「它刚好被删了」就让整条消息发不出去。
+    let skill = request
+        .skill_id
+        .as_deref()
+        .and_then(|id| config.read(|cfg| cfg.skills.iter().find(|s| s.id == id).cloned()));
+    if let Some(skill) = &skill {
+        effective_system_prompt = append_system_block(effective_system_prompt, &skill.prompt);
+    }
+
     // 长期记忆：把与这次提问相关的几条记忆拼进系统提示词。
     //
-    // 三条考虑：
+    // 四条考虑：
     // - **只在本条请求里做一次**（不是每一轮工具循环都做）：多轮工具调用复用同一份
     //   系统提示词，重复注入只会让它们互相矛盾；
     // - **默认关闭**：这等于把本地存下来的用户信息发给服务商，与工具开关同一个立场
     //   （默认关、用户自己开）；
+    // - **技能可以关掉它**：记忆注入不是工具调用，而是往系统提示词里塞本地数据，
+    //   所以 `tools_for` 那套过滤管不到它。「纯离线总结」要真的离线，就必须连
+    //   这一起关掉 —— 否则它一边关掉联网工具、一边把用户档案发出去；
     // - **检索失败不影响聊天**：记忆是锦上添花，出问题记一条诊断日志就够，
     //   不能因为查询记忆失败而让整条消息发不出去。
-    if config.read(|cfg| cfg.memory_enabled) {
+    if skill_allows_capability(skill.as_ref(), "remember") && config.read(|cfg| cfg.memory_enabled)
+    {
         let last_user = request
             .messages
             .iter()
@@ -104,7 +120,7 @@ pub async fn chat_send(
             match db.memory_relevant(query, crate::memory::INJECT_LIMIT) {
                 Ok(memories) if !memories.is_empty() => {
                     let block = crate::memory::prompt_block(&memories);
-                    effective_system_prompt = merge_memory_block(effective_system_prompt, &block);
+                    effective_system_prompt = append_system_block(effective_system_prompt, &block);
                     let ids: Vec<String> = memories.iter().map(|m| m.id.clone()).collect();
                     if let Err(e) = db.memory_mark_used(&ids) {
                         state
@@ -364,12 +380,31 @@ async fn run_stream(
     // 这里每次请求都查一次 COUNT —— 单表计数，代价可以忽略。
     let kb_available = db.kb_document_count().unwrap_or(0) > 0;
     let memory_enabled = config.read(|c| c.memory_enabled);
+    // 技能点了名就按它的白名单来（`None` = 不干预）。
+    //
+    // 这里要重新解析一次技能（系统提示词那次在 `chat_send` 里）：两处需要的
+    // 东西不同 —— 那边要 `prompt`，这边要 `tools`。技能本身很小（一条字符串
+    // 加几个工具名），多读一次配置比把 `Skill` 一路传进来更简单，也更难写错。
+    //
+    // 注意白名单**只收窄不放开**：`web_search` 没配端点时它本来就不在清单里，
+    // 技能点名也不会凭空出现（否则模型会去调一个必然失败的工具）。
+    let skill = request
+        .skill_id
+        .as_deref()
+        .and_then(|id| config.read(|cfg| cfg.skills.iter().find(|s| s.id == id).cloned()));
+    let tool_whitelist = skill
+        .as_ref()
+        .filter(|s| s.restricts_tools())
+        .map(|s| s.tools.clone());
     let tools = request.enable_tools.then(|| {
-        registry::to_openai_tools(registry::ToolAvailability {
-            web_search: search_endpoint.is_some(),
-            knowledge_base: kb_available,
-            memory: memory_enabled,
-        })
+        registry::to_openai_tools(
+            registry::ToolAvailability {
+                web_search: search_endpoint.is_some(),
+                knowledge_base: kb_available,
+                memory: memory_enabled,
+            },
+            tool_whitelist.as_deref(),
+        )
     });
     let tool_ctx = registry::ToolContext {
         search_endpoint: search_endpoint.clone(),
@@ -378,6 +413,9 @@ async fn run_stream(
         // 免得出现「工具列表里没有、但直接调用却能跑」的不一致状态。
         knowledge_base: kb_available.then(|| db.clone()),
         memory: memory_enabled.then(|| db.clone()),
+        // 执行时也拦一道：模型可以凭名字硬调一个没下发的工具，
+        // 而「纯离线总结」被硬调一次 web_search 就意味着数据发出去了。
+        allowed: tool_whitelist.clone(),
     };
 
     // 数据流防泄漏：任何「读本地敏感数据」的工具成功执行过之后置位；
@@ -1248,16 +1286,28 @@ fn attach_images(db: &Database, messages: &mut [ChatMessage]) {
     }
 }
 
-/// 把记忆块接到系统提示词后面。
+/// 技能是否允许某项**能力**。
 ///
-/// 单独抽出来是为了能测：注入这一步在 `chat_send` 里、又依赖真库与真服务商，
+/// 只用于「不是工具调用、但同样会把本地数据发出去」的东西 —— 目前是长期记忆
+/// （它拼进系统提示词，`tools_for` 那套工具清单过滤管不到）。
+/// 技能不限制工具（`None` 或空名单）时一律允许。
+fn skill_allows_capability(skill: Option<&Skill>, capability: &str) -> bool {
+    match skill {
+        Some(s) if s.restricts_tools() => s.allows(capability),
+        _ => true,
+    }
+}
+
+/// 往系统提示词后面接一段说明（记忆、技能指令都走这里）。
+///
+/// 单独抽出来是为了能测：这些注入都发生在 `chat_send` 里、又依赖真库与真服务商，
 /// 端到端跑不起来；而「怎么拼」这条规则本身是纯的，值得单测盯着。
 ///
 /// 两条规则：
-/// - 本来没有系统提示词时，记忆块**就是**系统提示词（不能拼出一个以空行
+/// - 本来没有系统提示词时，这一块**就是**系统提示词（不能拼出一个以空行
 ///   开头的提示词）；
-/// - 空块不改变原样（否则每次都会多出一个空行，还会让「有记忆」的判断失真）。
-fn merge_memory_block(base: Option<String>, block: &str) -> Option<String> {
+/// - 空块不改变原样（否则每次都会多出一个空行）。
+fn append_system_block(base: Option<String>, block: &str) -> Option<String> {
     if block.trim().is_empty() {
         return base;
     }
@@ -1296,8 +1346,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn memory_block_is_appended_to_the_system_prompt() {
-        let merged = merge_memory_block(Some("你是浮语。".into()), "关于用户：喜欢 Rust")
+    fn a_skill_that_restricts_tools_can_also_shut_off_memory_injection() {
+        use crate::storage::config::Skill;
+
+        // 「纯离线总结」这类技能：只点名了 get_current_time
+        let offline = Skill {
+            id: "s".to_string(),
+            name: "纯离线".to_string(),
+            description: String::new(),
+            prompt: "只依据用户发来的内容".to_string(),
+            tools: vec!["get_current_time".to_string()],
+            builtin: false,
+        };
+        assert!(
+            !skill_allows_capability(Some(&offline), "remember"),
+            "记忆注入也是把本地数据发出去，必须能被技能关掉"
+        );
+
+        // 不限制工具的技能不管这件事
+        let plain = Skill {
+            tools: Vec::new(),
+            ..offline.clone()
+        };
+        assert!(skill_allows_capability(Some(&plain), "remember"));
+        // 没选技能时也不管
+        assert!(skill_allows_capability(None, "remember"));
+
+        // 点名了记忆的技能当然允许
+        let with_memory = Skill {
+            tools: vec!["remember".to_string()],
+            ..offline
+        };
+        assert!(skill_allows_capability(Some(&with_memory), "remember"));
+    }
+
+    #[test]
+    fn a_block_is_appended_to_the_system_prompt() {
+        let merged = append_system_block(Some("你是浮语。".into()), "关于用户：喜欢 Rust")
             .expect("有内容就该合出来");
         assert!(merged.starts_with("你是浮语。"), "{merged}");
         assert!(merged.ends_with("关于用户：喜欢 Rust"), "{merged}");
@@ -1306,24 +1391,24 @@ mod tests {
     }
 
     #[test]
-    fn memory_block_becomes_the_prompt_when_there_is_none() {
+    fn a_block_becomes_the_prompt_when_there_is_none() {
         // 不能拼出一个以空行开头的系统提示词
         assert_eq!(
-            merge_memory_block(None, "关于用户：喜欢 Rust"),
+            append_system_block(None, "关于用户：喜欢 Rust"),
             Some("关于用户：喜欢 Rust".to_string())
         );
         // 空白提示词等同于没有
         assert_eq!(
-            merge_memory_block(Some("   ".into()), "关于用户：喜欢 Rust"),
+            append_system_block(Some("   ".into()), "关于用户：喜欢 Rust"),
             Some("关于用户：喜欢 Rust".to_string())
         );
     }
 
     #[test]
-    fn an_empty_memory_block_changes_nothing() {
-        assert_eq!(merge_memory_block(None, ""), None);
+    fn an_empty_block_changes_nothing() {
+        assert_eq!(append_system_block(None, ""), None);
         assert_eq!(
-            merge_memory_block(Some("你是浮语。".into()), "  "),
+            append_system_block(Some("你是浮语。".into()), "  "),
             Some("你是浮语。".to_string())
         );
     }
@@ -1361,7 +1446,7 @@ mod tests {
 
         let base = Some("你是浮语。".to_string());
         let prompt =
-            merge_memory_block(base, &crate::memory::prompt_block(&memories)).expect("应当合出来");
+            append_system_block(base, &crate::memory::prompt_block(&memories)).expect("应当合出来");
         assert!(prompt.starts_with("你是浮语。"), "{prompt}");
         assert!(prompt.contains("用户偏好 Rust"), "{prompt}");
         assert!(!prompt.contains("团子"), "不相关的记忆不该被注入：{prompt}");
@@ -1393,6 +1478,7 @@ mod tests {
             max_tokens: None,
             enable_tools: false,
             approval_session_id: None,
+            skill_id: None,
         }
     }
 

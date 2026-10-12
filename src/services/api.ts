@@ -16,6 +16,7 @@ import type {
   KbHit,
   KbStats,
   Memory,
+  SkillPreset,
   MemoryAddOutcome,
   MemoryStats,
   MessageHit,
@@ -41,6 +42,8 @@ export interface SettingsPatch {
   memoryEnabled?: boolean;
   /** 一问多答的对比目标（整表覆写）。 */
   compareTargets?: CompareTarget[];
+  /** 技能列表（整表覆写）。 */
+  skills?: SkillPreset[];
   webSearchEndpoint?: string;
   proxyUrl?: string;
   useSystemProxy?: boolean;
@@ -116,6 +119,8 @@ export const api = {
     maxTokens?: number | null;
     enableTools?: boolean;
     approvalSessionId?: string | null;
+    /** 本次使用的技能（一次性任务指令 + 工具白名单）。 */
+    skillId?: string | null;
   }) => invoke<string>("chat_send", { request }),
   chatCancel: (requestId: string) =>
     invoke<boolean>("chat_cancel", { requestId }),

@@ -688,6 +688,67 @@ const scenarios = {
 
     await cleanupNewConversations(before.conversations);
   },
+  /**
+   * 画图。
+   *
+   * 同样是本地 mock（`/v1/images/generations` 回一张 1x1 PNG 的 base64）：
+   * 验的是应用这一侧 —— 请求怎么发、base64 怎么变成 data URL、图片怎么落库并渲染。
+   *
+   * 这一条还有个"顺带"的意义：图片服务商与模型（`imageProviderId` / `imageModel`）
+   * 是前几轮修过的设置项（当时它们**根本存不进去**），现在能真的生效了。
+   */
+  async imageGen() {
+    await expandWindow();
+    const before = dbCounts();
+
+    const prompt = "端到端验证：画一只猫";
+    await evalJs(`
+      window.__dsh.setValue(document.querySelector("textarea"), ${JSON.stringify(prompt)});
+      return true;
+    `);
+    await new Promise((r) => setTimeout(r, 200));
+    await evalJs(`window.__dsh.clickText(".compare-button", "画图"); return true;`);
+
+    // 等图片出现（应用会把它作为一条助手消息追加进会话）
+    try {
+      await waitFor(`document.querySelectorAll("img").length > 0`, "图片出现", 30000);
+    } catch {
+      const dump = await evalJs(`
+        const notices = Array.from(document.querySelectorAll(".notice, .toast, .error"))
+          .map((el) => el.innerText.trim()).filter(Boolean).join(" | ");
+        const area = Array.from(document.querySelectorAll(".field")).map((el) => el.innerText).join(" ")
+          .replace(/\\n+/g, " ").slice(0, 120);
+        return { notices, tail: document.body.innerText.replace(/\\n+/g, " ").slice(-260) };
+      `);
+      console.log(`  提示：${dump.notices || "(无)"}`);
+      console.log(`  界面尾部：${dump.tail}`);
+      throw new Error("图片没有出现（原因见上）");
+    }
+
+    const shown = await evalJs(`
+      const images = Array.from(document.querySelectorAll("img"));
+      const last = images.at(-1);
+      const notices = Array.from(document.querySelectorAll(".notice, .toast"))
+        .map((el) => el.innerText.trim()).filter(Boolean).join(" | ");
+      return {
+        count: images.length,
+        src: (last?.src ?? "").slice(0, 40),
+        notices,
+        text: document.body.innerText.replace(/\\n+/g, " ").slice(-160),
+      };
+    `);
+    console.log(`  图片 ${shown.count} 张，最后一张 src 开头：${shown.src}`);
+    if (shown.notices) console.log(`  提示：${shown.notices.slice(0, 100)}`);
+    assert(shown.count > 0, "界面上出现了图片");
+    assert(shown.src.startsWith("data:image") || shown.src.startsWith("http"), `图片是 data URL 或 http：${shown.src}`);
+    assert(!shown.notices.includes("失败"), `没有失败提示：${shown.notices.slice(0, 80)}`);
+
+    const after = dbCounts();
+    console.log(`  数据库：消息 ${before.messages} → ${after.messages}`);
+    assert(after.messages >= before.messages + 2, "画图这一轮一问一答都落库了（含图片）");
+
+    await cleanupNewConversations(before.conversations);
+  },
   async mcpScan() {
     await openSettings();
     await switchTab("通用");

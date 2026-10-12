@@ -818,27 +818,46 @@ const scenarios = {
     await waitFor(`document.querySelector('[class*="compare-panel"]')`, "对比面板出现", 10000);
 
     // 勾一个用 mock 的目标（面板里每一行是「服务商 · 模型」）
+    // 要勾**至少两个**：面板上写着「至少要选 2 个模型才能对比」——
+    // 第一版我只勾了一个，于是点「开始对比」什么都不发生（提示就在面板里，
+    // 而我先猜了"问题没填对"，白费一轮）。
     const picked = await evalJs(`
       const labels = Array.from(document.querySelectorAll("label"));
-      const target = labels.find((el) => (el.innerText ?? "").includes("mock-model"));
-      if (!target) {
-        return { ok: false, sample: labels.map((el) => el.innerText.replace(/\\n+/g, " ").slice(0, 30)).slice(0, 6) };
+      const targets = labels.filter((el) => (el.innerText ?? "").includes("mock-"));
+      for (const target of targets) {
+        const input = target.querySelector('input[type="checkbox"]');
+        if (input && !input.checked) input.click();
       }
-      const input = target.querySelector('input[type="checkbox"]');
-      if (input && !input.checked) input.click();
-      return { ok: true, text: target.innerText.replace(/\\n+/g, " ") };
+      return {
+        ok: targets.length >= 2,
+        count: targets.length,
+        text: targets.map((el) => el.innerText.replace(/\\n+/g, " ")).join(" / "),
+      };
     `);
-    if (!picked.ok) throw new Error(`对比面板里找不到 mock 目标，现有的是：${JSON.stringify(picked.sample)}`);
-    console.log(`  勾选了目标：${picked.text}`);
+    if (!picked.ok) throw new Error(`对比面板里需要至少 2 个 mock 目标，实际 ${picked.count} 个：${picked.text}`);
+    console.log(`  勾选了 ${picked.count} 个目标：${picked.text}`);
 
-    // 问题写在编写区的输入框里
+    // 问题写在**面板自己的输入框**里（.compare-question）——
+    // 不来自编写区。这一点是读 ComparePanel.tsx 才看清的：
+    // 面板里有个 <textarea className="compare-question" placeholder="写下要对比的问题…">
     const question = "端到端验证：对比一句话";
     await evalJs(`
-      window.__dsh.setValue(document.querySelector("textarea"), ${JSON.stringify(question)});
+      const box = document.querySelector(".compare-question");
+      if (!box) throw new Error("找不到对比面板的输入框");
+      window.__dsh.setValue(box, ${JSON.stringify(question)});
       return true;
     `);
     await new Promise((r) => setTimeout(r, 300));
     await evalJs(`window.__dsh.clickText("button", "开始对比"); return true;`);
+    await new Promise((r) => setTimeout(r, 4000));
+    const afterStart = await evalJs(`
+      const panel = document.querySelector("[class*=compare-panel]");
+      const notices = Array.from(document.querySelectorAll(".notice, .toast, .error"))
+        .map((el) => el.innerText.trim()).filter(Boolean).join(" | ");
+      return { notices, panel: panel ? panel.innerText.replace(/\\n+/g, " ").slice(0, 400) : "(没有面板)" };
+    `);
+    console.log(`  点完开始对比：提示=${afterStart.notices || "(无)"}`);
+    console.log(`  面板内容：${afterStart.panel}`);
 
     await waitFor(
       `Array.from(document.querySelectorAll('[class*="compare-panel"]')).some((el) =>

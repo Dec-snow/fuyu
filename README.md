@@ -407,3 +407,36 @@ API Key 全部失效，属于绝对不能动的量）。
    本仓库的 MIT 协议只覆盖作者自己写的代码与文档。
 
 如果这个仓库里出现了应当标注来源却遗漏的地方，欢迎提 issue。
+
+---
+
+## 真机端到端验证（tools/）
+
+这个仓库里有三个只用于**验证**的脚本，都不参与应用运行：
+
+| 脚本 | 作用 |
+|---|---|
+| `tools/drive-app.mjs` | **真机 GUI 端到端**：用 WebView2 的远程调试端口（CDP）驱动**真实运行的应用窗口** —— 打开设置逐个页签、导入文件与文档解析、知识库导入与试搜、长期记忆、技能、侧边栏、导出/导入、斜杠命令、聊天流式、画图、一问多答、MCP 配置与扫描、MCP 工具调用闭环、设置项落盘 |
+| `tools/mock-model-server.mjs` | **本地假模型**（OpenAI 兼容：SSE 流式 / 工具调用 / 图片）。应用支持「自定义服务商」，且本地端点按设计**不需要 Key** —— 所以聊天、画图、一问多答、MCP 工具调用这几条路都能在没有真实 API Key 的情况下验通 |
+| `tools/purge-test-data.mjs` | 清掉验证留下的测试数据。**独立于场景成败**（场景中途失败时它照样能跑），判据是"标题或首条用户消息命中测试标记"以及"一条消息都没有的空会话" |
+
+用法：
+
+```powershell
+# 1) 起本地假模型（另一个终端）
+node tools/mock-model-server.mjs 8765
+
+# 2) 跑全部场景（会自己拉起应用、跑完关掉）
+node tools/drive-app.mjs
+node tools/drive-app.mjs --scenario=imageGen   # 单个场景
+node tools/drive-app.mjs --dump                # 把界面上有什么打出来（找选择器用）
+
+# 3) 判断"稳定不稳定"：重复跑，而不是靠一次通过
+1..5 | ForEach-Object { node tools/drive-app.mjs --scenario=mcp }
+
+# 4) 清理测试数据（跑前跑后各一次）
+node tools/purge-test-data.mjs
+```
+
+**已知不稳定**（如实记录，不掩饰）：`compareRun` 在 3 次重复中通过 2 次（其余三条 3/3）。
+`mcp` 曾连续 5 次通过。失败样本还在收集，原因未定。

@@ -513,6 +513,13 @@ const scenarios = {
     }
 
     // 「对比」：应当出现对比面板
+    // 先把问题写进输入框，**再**打开对比面板：
+    // 面板很可能在打开时就把问题取走了，打开之后再填它不会认。
+    await evalJs(`
+      window.__dsh.setValue(document.querySelector("textarea"), "端到端验证：对比一句话");
+      return true;
+    `);
+    await new Promise((r) => setTimeout(r, 200));
     await evalJs(`window.__dsh.clickText(".compare-button", "对比"); return true;`);
     await new Promise((r) => setTimeout(r, 600));
     const compare = await evalJs(`
@@ -786,6 +793,80 @@ const scenarios = {
     assert(after.messages >= before.messages + 2, "画图这一轮一问一答都落库了（含图片）");
 
     await cleanupNewConversations(before.conversations);
+  },
+  /**
+   * 一问多答（对比）。
+   *
+   * 三条要验的：
+   *  1. 面板里能勾选模型目标（用本地 mock，不需要 Key）；
+   *  2. 「开始对比」之后并发拿到回答；
+   *  3. **不写进聊天记录** —— 这是这个功能的设计承诺（面板上就写着
+   *     "对比不会写进聊天记录，看中了再点「采用这条」"），必须用数据库核对。
+   */
+  async compareRun() {
+    await expandWindow();
+    const before = dbCounts();
+
+    // 先把问题写进输入框，**再**打开对比面板：
+    // 面板很可能在打开时就把问题取走了，打开之后再填它不会认。
+    await evalJs(`
+      window.__dsh.setValue(document.querySelector("textarea"), "端到端验证：对比一句话");
+      return true;
+    `);
+    await new Promise((r) => setTimeout(r, 200));
+    await evalJs(`window.__dsh.clickText(".compare-button", "对比"); return true;`);
+    await waitFor(`document.querySelector('[class*="compare-panel"]')`, "对比面板出现", 10000);
+
+    // 勾一个用 mock 的目标（面板里每一行是「服务商 · 模型」）
+    const picked = await evalJs(`
+      const labels = Array.from(document.querySelectorAll("label"));
+      const target = labels.find((el) => (el.innerText ?? "").includes("mock-model"));
+      if (!target) {
+        return { ok: false, sample: labels.map((el) => el.innerText.replace(/\\n+/g, " ").slice(0, 30)).slice(0, 6) };
+      }
+      const input = target.querySelector('input[type="checkbox"]');
+      if (input && !input.checked) input.click();
+      return { ok: true, text: target.innerText.replace(/\\n+/g, " ") };
+    `);
+    if (!picked.ok) throw new Error(`对比面板里找不到 mock 目标，现有的是：${JSON.stringify(picked.sample)}`);
+    console.log(`  勾选了目标：${picked.text}`);
+
+    // 问题写在编写区的输入框里
+    const question = "端到端验证：对比一句话";
+    await evalJs(`
+      window.__dsh.setValue(document.querySelector("textarea"), ${JSON.stringify(question)});
+      return true;
+    `);
+    await new Promise((r) => setTimeout(r, 300));
+    await evalJs(`window.__dsh.clickText("button", "开始对比"); return true;`);
+
+    await waitFor(
+      `Array.from(document.querySelectorAll('[class*="compare-panel"]')).some((el) =>
+        (el.innerText ?? "").includes("mock 回复"))`,
+      "对比面板里出现回答",
+      60000,
+    );
+    const panel = await evalJs(`
+      const el = document.querySelector('[class*="compare-panel"]');
+      return el ? el.innerText.replace(/\\n+/g, " ").slice(0, 300) : "";
+    `);
+    console.log(`  面板内容：${panel}`);
+    assert(panel.includes("mock 回复"), "面板里拿到了 mock 的回答");
+    assert(panel.includes(question.slice(0, 6)), "回答对应的正是我问的那句");
+
+    const after = dbCounts();
+    console.log(`  数据库：会话 ${before.conversations} → ${after.conversations}，消息 ${before.messages} → ${after.messages}`);
+    assert(
+      after.conversations === before.conversations && after.messages === before.messages,
+      "对比**没有**写进聊天记录（这是它的设计承诺）",
+    );
+
+    await evalJs(`
+      const close = Array.from(document.querySelectorAll("button")).find((b) =>
+        (b.textContent ?? "").trim() === "关闭" || (b.title ?? "").includes("关闭"));
+      if (close) close.click();
+      return true;
+    `);
   },
   async mcpScan() {
     await openSettings();

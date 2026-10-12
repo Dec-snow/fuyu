@@ -163,6 +163,35 @@ export interface UsageReport {
   pricedModels: number;
 }
 
+/** 知识库里的一篇文档。 */
+export interface KbDocument {
+  id: string;
+  title: string;
+  /** 来源：文件名，或「粘贴的文本」。 */
+  source: string;
+  chars: number;
+  chunkCount: number;
+  addedAt: number;
+}
+
+/** 一次知识库检索的命中。 */
+export interface KbHit {
+  chunkId: string;
+  documentId: string;
+  title: string;
+  /** 文档里的第几片（从 1 开始）。 */
+  ordinal: number;
+  text: string;
+  score: number;
+}
+
+export interface KbStats {
+  documents: number;
+  chunks: number;
+  terms: number;
+  chars: number;
+}
+
 export interface StoredMessage {
   id: string;
   conversationId: string;

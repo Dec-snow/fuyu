@@ -10,6 +10,9 @@ import type {
   AppInfo,
   Conversation,
   Diagnostics,
+  KbDocument,
+  KbHit,
+  KbStats,
   MessageHit,
   ProvidersState,
   RolePreset,
@@ -181,6 +184,20 @@ export const api = {
       chars: number;
       truncated: boolean;
     }>("extract_document", { fileName, payload }),
+
+  // ---- 本地知识库
+  //
+  // 检索在 Rust 侧做（自定义分词 + BM25）。这里只负责搬运与展示。
+  kbList: () => invoke<KbDocument[]>("kb_list"),
+  kbStats: () => invoke<KbStats>("kb_stats"),
+  kbAddText: (title: string, source: string | null, text: string) =>
+    invoke<KbDocument>("kb_add_text", { title, source, text }),
+  /** Office 文档：前端读成 data URL，后端提取文字后入库。 */
+  kbAddDocument: (fileName: string, payload: string) =>
+    invoke<KbDocument>("kb_add_document", { fileName, payload }),
+  kbDelete: (id: string) => invoke<void>("kb_delete", { id }),
+  kbSearch: (query: string, limit?: number) =>
+    invoke<KbHit[]>("kb_search", { query, limit: limit ?? null }),
 
   // ---- 历史
   listConversations: (limit?: number) =>

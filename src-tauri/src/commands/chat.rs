@@ -326,12 +326,21 @@ async fn run_stream(
     let proxy_url = config
         .read(|c| c.proxy_url.clone())
         .filter(|value| !value.trim().is_empty());
-    let tools = request
-        .enable_tools
-        .then(|| registry::to_openai_tools(search_endpoint.is_some()));
+    // 知识库为空时不下发检索工具：模型看不到就不会去调一个必然空手而归的工具。
+    // 这里每次请求都查一次 COUNT —— 单表计数，代价可以忽略。
+    let kb_available = db.kb_document_count().unwrap_or(0) > 0;
+    let tools = request.enable_tools.then(|| {
+        registry::to_openai_tools(registry::ToolAvailability {
+            web_search: search_endpoint.is_some(),
+            knowledge_base: kb_available,
+        })
+    });
     let tool_ctx = registry::ToolContext {
         search_endpoint: search_endpoint.clone(),
         proxy_url,
+        // 库里没文档就不给句柄：与「不下发工具」保持一致，
+        // 免得出现「工具列表里没有、但直接调用却能跑」的不一致状态。
+        knowledge_base: kb_available.then(|| db.clone()),
     };
 
     // 数据流防泄漏：任何「读本地敏感数据」的工具成功执行过之后置位；

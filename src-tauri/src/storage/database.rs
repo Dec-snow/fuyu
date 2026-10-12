@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use rusqlite::{Connection, OptionalExtension};
 
 use crate::errors::{AppError, AppResult};
+use crate::kb::{self, KbDocument, KbHit, KbStats};
 use crate::models::chat::{Conversation, MessageHit, MessageStatus, MessageText, StoredMessage};
 use crate::storage::backup::{Backup, BackupConversation, BackupMessage, ImportReport};
 use crate::storage::{new_id, now_ms};
@@ -182,6 +183,48 @@ const MIGRATIONS: &[Step] = &[
         column: "role_id",
         decl: "TEXT",
     },
+    // v14 —— 本地知识库（BM25 倒排索引）。
+    //
+    // 为什么不用 FTS5：消息搜索用的是 trigram 分词器（为了中文子串匹配），
+    // 而 trigram 下 `bm25()` 几乎没有区分度（三元组遍地都是）；真正的中文 BM25
+    // 需要「词」的概念，FTS5 的 unicode61 又不切中文。自己维护倒排表反而更可控，
+    // 而且分词与打分都是纯函数、能单测。
+    //
+    // 四张表的分工：
+    // - `kb_documents`：文档元信息（列表用）
+    // - `kb_chunks`：切片正文 + token 数（BM25 的长度归一化要用）
+    // - `kb_postings`：(词, 片段) → 词频。`WITHOUT ROWID` 是因为它就是个
+    //   复合主键的映射表，不需要额外的 rowid
+    // - `kb_terms`：词 → 文档频率（df）。单独存一份是为了查 df 时不用扫倒排表；
+    //   它在收录/删除时同步维护，删除时要**重算**（见 `kb_delete_document`）
+    Step::Sql(
+        "CREATE TABLE IF NOT EXISTS kb_documents (
+            id          TEXT PRIMARY KEY,
+            title       TEXT NOT NULL,
+            source      TEXT NOT NULL DEFAULT '',
+            chars       INTEGER NOT NULL DEFAULT 0,
+            chunk_count INTEGER NOT NULL DEFAULT 0,
+            added_at    INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS kb_chunks (
+            id          TEXT PRIMARY KEY,
+            document_id TEXT NOT NULL REFERENCES kb_documents(id) ON DELETE CASCADE,
+            ordinal     INTEGER NOT NULL,
+            text        TEXT NOT NULL,
+            tokens      INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS kb_chunks_document ON kb_chunks(document_id);
+        CREATE TABLE IF NOT EXISTS kb_postings (
+            term     TEXT NOT NULL,
+            chunk_id TEXT NOT NULL REFERENCES kb_chunks(id) ON DELETE CASCADE,
+            tf       INTEGER NOT NULL,
+            PRIMARY KEY (term, chunk_id)
+        ) WITHOUT ROWID;
+        CREATE TABLE IF NOT EXISTS kb_terms (
+            term TEXT PRIMARY KEY,
+            df   INTEGER NOT NULL
+        ) WITHOUT ROWID;",
+    ),
 ];
 
 /// 当前代码期望的库版本。
@@ -457,8 +500,317 @@ impl Database {
         })
     }
 
-    /// 按「天 + 服务商 + 模型」聚合 token 用量，供费用估算与趋势图使用。
+    // ------------------------------------------------------------------
+    // 本地知识库（BM25）
+    // ------------------------------------------------------------------
+
+    /// 收录一篇文档：切块 + 建倒排索引，**全在一个事务里**。
     ///
+    /// 不整篇重算：只在 `kb_terms` 上把命中的词的 df 各加一。这样收录一篇
+    /// 大文档的代价与文档本身成正比，而不是与整个库成正比。
+    pub fn kb_add_document(&self, title: &str, source: &str, text: &str) -> AppResult<KbDocument> {
+        let title = title.trim();
+        let text = text.trim();
+        if title.is_empty() {
+            return Err(AppError::invalid("文档标题不能为空"));
+        }
+        if text.is_empty() {
+            return Err(AppError::invalid("文档内容为空，没有可索引的文字"));
+        }
+        let chars = text.chars().count();
+        if chars > kb::MAX_DOCUMENT_CHARS {
+            return Err(AppError::invalid(format!(
+                "文档太长（{chars} 字，上限 {} 字）",
+                kb::MAX_DOCUMENT_CHARS
+            )));
+        }
+
+        let chunks = kb::chunk_text(text, kb::DEFAULT_CHUNK_CHARS, kb::DEFAULT_OVERLAP_CHARS);
+        if chunks.is_empty() {
+            return Err(AppError::invalid("文档内容为空，没有可索引的文字"));
+        }
+
+        let document_id = new_id("kbd_");
+        let now = now_ms();
+        let chunk_count = chunks.len() as i64;
+
+        self.with_conn(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
+                "INSERT INTO kb_documents (id, title, source, chars, chunk_count, added_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![document_id, title, source, chars as i64, chunk_count, now],
+            )?;
+
+            for (index, chunk) in chunks.iter().enumerate() {
+                let chunk_id = new_id("kbc_");
+                let tokens = kb::tokenize(chunk);
+                // 词频表：同一片里出现几次就是几次；顺带算出去重后的词表
+                let mut tf: std::collections::HashMap<&str, i64> = std::collections::HashMap::new();
+                for token in &tokens {
+                    *tf.entry(token.as_str()).or_insert(0) += 1;
+                }
+
+                tx.execute(
+                    "INSERT INTO kb_chunks (id, document_id, ordinal, text, tokens)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    rusqlite::params![
+                        chunk_id,
+                        document_id,
+                        index as i64,
+                        chunk,
+                        tokens.len().min(kb::MAX_TOKENS_PER_CHUNK) as i64
+                    ],
+                )?;
+
+                for (term, count) in &tf {
+                    tx.execute(
+                        "INSERT INTO kb_postings (term, chunk_id, tf) VALUES (?1, ?2, ?3)",
+                        rusqlite::params![term, chunk_id, count],
+                    )?;
+                    tx.execute(
+                        "INSERT INTO kb_terms (term, df) VALUES (?1, 1)
+                         ON CONFLICT(term) DO UPDATE SET df = df + 1",
+                        rusqlite::params![term],
+                    )?;
+                }
+            }
+
+            tx.commit()?;
+            Ok(KbDocument {
+                id: document_id.clone(),
+                title: title.to_string(),
+                source: source.to_string(),
+                chars: chars as i64,
+                chunk_count,
+                added_at: now,
+            })
+        })
+    }
+
+    pub fn kb_list_documents(&self) -> AppResult<Vec<KbDocument>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, title, source, chars, chunk_count, added_at
+                   FROM kb_documents
+                  ORDER BY added_at DESC, id ASC",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok(KbDocument {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    source: row.get(2)?,
+                    chars: row.get(3)?,
+                    chunk_count: row.get(4)?,
+                    added_at: row.get(5)?,
+                })
+            })?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            Ok(out)
+        })
+    }
+
+    /// 删除一篇文档。切片与倒排项靠外键级联删掉，**df 必须自己重算**。
+    ///
+    /// 为什么不能直接 `df -= 1`：一个词可能在一篇文档的多个片段里都出现，
+    /// 删掉这篇文档后 df 要减少的量是「这篇文档里包含该词的片段数」——
+    /// 逐个算容易错，直接按剩余的倒排项重数一遍最稳（删除本来就不频繁）。
+    /// 另外词可能只存在于被删的文档里，此时 df 归零、必须把词也删掉，
+    /// 否则 `idf` 会基于一个不存在的词计算，搜索时会凭空给分。
+    pub fn kb_delete_document(&self, id: &str) -> AppResult<()> {
+        self.with_conn(|conn| {
+            let tx = conn.unchecked_transaction()?;
+
+            // 先记下这篇文档用到了哪些词（删完就查不到了）
+            let mut terms: Vec<String> = Vec::new();
+            {
+                let mut stmt = tx.prepare(
+                    "SELECT DISTINCT p.term FROM kb_postings p
+                       JOIN kb_chunks c ON c.id = p.chunk_id
+                      WHERE c.document_id = ?1",
+                )?;
+                let rows = stmt.query_map([id], |row| row.get::<_, String>(0))?;
+                for row in rows {
+                    terms.push(row?);
+                }
+            }
+
+            tx.execute("DELETE FROM kb_documents WHERE id = ?1", [id])?;
+
+            for term in &terms {
+                let remaining: i64 = tx.query_row(
+                    "SELECT COUNT(DISTINCT chunk_id) FROM kb_postings WHERE term = ?1",
+                    [term],
+                    |row| row.get(0),
+                )?;
+                if remaining <= 0 {
+                    tx.execute("DELETE FROM kb_terms WHERE term = ?1", [term])?;
+                } else {
+                    tx.execute(
+                        "UPDATE kb_terms SET df = ?2 WHERE term = ?1",
+                        rusqlite::params![term, remaining],
+                    )?;
+                }
+            }
+
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
+    pub fn kb_stats(&self) -> AppResult<KbStats> {
+        self.with_conn(|conn| {
+            let documents: i64 =
+                conn.query_row("SELECT COUNT(*) FROM kb_documents", [], |r| r.get(0))?;
+            let chunks: i64 = conn.query_row("SELECT COUNT(*) FROM kb_chunks", [], |r| r.get(0))?;
+            let terms: i64 = conn.query_row("SELECT COUNT(*) FROM kb_terms", [], |r| r.get(0))?;
+            let chars: i64 = conn.query_row(
+                "SELECT COALESCE(SUM(chars), 0) FROM kb_documents",
+                [],
+                |r| r.get(0),
+            )?;
+            Ok(KbStats {
+                documents,
+                chunks,
+                terms,
+                chars,
+            })
+        })
+    }
+
+    /// 库里有多少篇文档。工具清单用它决定要不要下发检索工具。
+    pub fn kb_document_count(&self) -> AppResult<i64> {
+        self.with_conn(|conn| {
+            Ok(conn.query_row("SELECT COUNT(*) FROM kb_documents", [], |r| r.get(0))?)
+        })
+    }
+
+    /// BM25 检索。
+    ///
+    /// 分三步：拿到候选倒排项（一条 JOIN 查询）→ 纯函数打分排序 →
+    /// 取前 N 片的正文。第三步只对最终结果查一次，不去读全部片段。
+    pub fn kb_search(&self, query: &str, limit: usize) -> AppResult<Vec<KbHit>> {
+        let terms = kb::query_terms(query);
+        let limit = limit.clamp(1, kb::MAX_SEARCH_LIMIT);
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        self.with_conn(|conn| {
+            let total_chunks: i64 =
+                conn.query_row("SELECT COUNT(*) FROM kb_chunks", [], |r| r.get(0))?;
+            if total_chunks == 0 {
+                return Ok(Vec::new());
+            }
+
+            let placeholders = vec!["?"; terms.len()].join(",");
+            let params: Vec<&dyn rusqlite::ToSql> =
+                terms.iter().map(|t| t as &dyn rusqlite::ToSql).collect();
+
+            // ① 倒排项（带片段长度，BM25 的长度归一化要用）
+            let postings_sql = format!(
+                "SELECT p.term, p.chunk_id, p.tf, c.tokens
+                   FROM kb_postings p JOIN kb_chunks c ON c.id = p.chunk_id
+                  WHERE p.term IN ({placeholders})"
+            );
+            let mut postings: HashMap<String, Vec<kb::rank::Posting>> = HashMap::new();
+            {
+                let mut stmt = conn.prepare(&postings_sql)?;
+                let rows = stmt.query_map(params.as_slice(), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                })?;
+                for row in rows {
+                    let (term, chunk_id, tf, tokens) = row?;
+                    postings
+                        .entry(term)
+                        .or_default()
+                        .push((chunk_id, tf, tokens));
+                }
+            }
+            if postings.is_empty() {
+                return Ok(Vec::new());
+            }
+
+            // ② 文档频率
+            let df_sql = format!("SELECT term, df FROM kb_terms WHERE term IN ({placeholders})");
+            let mut doc_freq: HashMap<String, i64> = HashMap::new();
+            {
+                let mut stmt = conn.prepare(&df_sql)?;
+                let rows = stmt.query_map(params.as_slice(), |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })?;
+                for row in rows {
+                    let (term, df) = row?;
+                    doc_freq.insert(term, df);
+                }
+            }
+
+            // ③ 打分（纯函数）
+            let ranked = kb::rank(&postings, &doc_freq, total_chunks, limit);
+            if ranked.is_empty() {
+                return Ok(Vec::new());
+            }
+
+            // ④ 取正文：只查最终这几片的正文与所属文档
+            let id_placeholders = vec!["?"; ranked.len()].join(",");
+            let detail_sql = format!(
+                "SELECT c.id, c.document_id, c.ordinal, c.text, d.title
+                   FROM kb_chunks c JOIN kb_documents d ON d.id = c.document_id
+                  WHERE c.id IN ({id_placeholders})"
+            );
+            let id_params: Vec<&dyn rusqlite::ToSql> = ranked
+                .iter()
+                .map(|s| &s.chunk_id as &dyn rusqlite::ToSql)
+                .collect();
+
+            let mut details: HashMap<String, (String, i64, String, String)> = HashMap::new();
+            {
+                let mut stmt = conn.prepare(&detail_sql)?;
+                let rows = stmt.query_map(id_params.as_slice(), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                })?;
+                for row in rows {
+                    let (chunk_id, document_id, ordinal, text, title) = row?;
+                    details.insert(chunk_id, (document_id, ordinal, text, title));
+                }
+            }
+
+            // 按打分顺序回填（HashMap 会打乱顺序，这里必须用 ranked 的次序）
+            let mut hits = Vec::with_capacity(ranked.len());
+            for scored in ranked {
+                let Some((document_id, ordinal, text, title)) = details.remove(&scored.chunk_id)
+                else {
+                    continue;
+                };
+                hits.push(KbHit {
+                    chunk_id: scored.chunk_id,
+                    document_id,
+                    title,
+                    // 界面显示第几片：从 1 开始更自然
+                    ordinal: ordinal + 1,
+                    text,
+                    score: scored.score,
+                });
+            }
+            Ok(hits)
+        })
+    }
+
+    /// 按「天 + 服务商 + 模型」聚合 token 用量，供费用估算与趋势图使用。
     /// 只统计**真的报过 usage 的助手消息**（两个 token 字段加起来大于 0）：
     /// - 用户消息没有 token，混进来会造出一堆「模型名为空」的行，
     ///   然后被费用估算当成「认不出来的模型」列出来 —— 那是纯噪音；
@@ -1371,6 +1723,154 @@ mod tests {
             db.get_conversation("conv_imported").unwrap().unwrap().title,
             DEFAULT_CONVERSATION_TITLE
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn kb_search_finds_the_right_document_in_chinese_and_english() {
+        let (db, dir) = temp_db();
+        db.kb_add_document(
+            "Rust 所有权",
+            "rust.md",
+            "Rust 的所有权系统在编译期检查内存安全，借用检查器会拒绝悬垂引用。",
+        )
+        .unwrap();
+        db.kb_add_document(
+            "浮语使用说明",
+            "manual.md",
+            "浮语支持全局热键 Alt+Space 唤出悬浮窗，也可以用划词助手 Alt+Q 提问。",
+        )
+        .unwrap();
+        db.kb_add_document("菜谱", "cook.md", "番茄炒蛋：先打蛋，再下锅翻炒。")
+            .unwrap();
+
+        // 中文检索（走单字 + 双字索引）
+        let hits = db.kb_search("借用检查器", 5).unwrap();
+        assert!(!hits.is_empty(), "中文检索不该空手而归");
+        assert_eq!(hits[0].title, "Rust 所有权");
+        assert_eq!(hits[0].ordinal, 1, "只有一片，应当是第 1 片");
+
+        // 英文 / 符号混排
+        let hits = db.kb_search("Alt+Space", 5).unwrap();
+        assert!(!hits.is_empty());
+        assert_eq!(hits[0].title, "浮语使用说明");
+
+        // 单字检索（只入 bigram 的实现在这里会失败）
+        let hits = db.kb_search("蛋", 5).unwrap();
+        assert!(!hits.is_empty());
+        assert_eq!(hits[0].title, "菜谱");
+
+        // 不相关的查询不该硬凑结果（这几个字都不在任何文档里）
+        assert!(db.kb_search("量子隧穿", 5).unwrap().is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn kb_search_prefers_the_more_specific_document() {
+        let (db, dir) = temp_db();
+        // 「知识库」在两篇里都出现，但第二篇更集中（出现次数多）
+        db.kb_add_document(
+            "泛泛而谈",
+            "a.md",
+            "这是一个知识库。它还提到别的很多东西，比如天气、交通、股票。",
+        )
+        .unwrap();
+        db.kb_add_document(
+            "知识库专论",
+            "b.md",
+            "知识库。知识库的检索。知识库的排序。知识库的切块。",
+        )
+        .unwrap();
+
+        let hits = db.kb_search("知识库", 5).unwrap();
+        assert!(hits.len() >= 2);
+        assert_eq!(hits[0].title, "知识库专论", "命中最集中的应当排第一");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn kb_delete_removes_postings_and_recomputes_document_frequency() {
+        let (db, dir) = temp_db();
+        let keep = db
+            .kb_add_document("保留", "keep.md", "浮语支持插件。")
+            .unwrap();
+        let drop = db
+            .kb_add_document("删除", "drop.md", "浮语支持插件。独一无二的词：鲸落。")
+            .unwrap();
+
+        let before = db.kb_stats().unwrap();
+        assert_eq!(before.documents, 2);
+
+        db.kb_delete_document(&drop.id).unwrap();
+
+        // ① 被删文档独有的词不该还能搜到
+        assert!(
+            db.kb_search("鲸落", 5).unwrap().is_empty(),
+            "被删文档的词还在倒排表里"
+        );
+
+        // ② 两篇都有的词仍然命中保留的那篇
+        let hits = db.kb_search("浮语 插件", 5).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].document_id, keep.id);
+
+        // ③ 统计与倒排表都跟着缩小（df 重算过，不该留下孤儿词）
+        let after = db.kb_stats().unwrap();
+        assert_eq!(after.documents, 1);
+        assert!(after.chunks < before.chunks);
+        assert!(
+            after.terms < before.terms,
+            "只存在于被删文档里的词应当被清掉"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn kb_add_rejects_empty_documents_with_a_clear_message() {
+        let (db, dir) = temp_db();
+        let blank = db.kb_add_document("标题", "x.md", "   \n\n  ").unwrap_err();
+        assert!(blank.message.contains("内容为空"), "{}", blank.message);
+        let no_title = db.kb_add_document("  ", "x.md", "有内容").unwrap_err();
+        assert!(no_title.message.contains("标题"), "{}", no_title.message);
+        // 拒收之后库里不该留下半份数据
+        assert_eq!(db.kb_stats().unwrap().documents, 0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn kb_stats_and_document_list_reflect_what_was_added() {
+        let (db, dir) = temp_db();
+        assert_eq!(db.kb_document_count().unwrap(), 0);
+
+        // 一段足够长、会被切成多片的文字
+        let long = "浮语的知识库测试。".repeat(200);
+        let doc = db.kb_add_document("长文", "long.md", &long).unwrap();
+        assert!(doc.chunk_count > 1, "这么长的文字应当被切成多片");
+        assert_eq!(doc.chars, long.chars().count() as i64);
+
+        assert_eq!(db.kb_document_count().unwrap(), 1);
+        let list = db.kb_list_documents().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].title, "长文");
+
+        let stats = db.kb_stats().unwrap();
+        assert_eq!(stats.documents, 1);
+        assert_eq!(stats.chunks, doc.chunk_count);
+        assert!(stats.terms > 0);
+        assert_eq!(stats.chars, doc.chars);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn kb_search_on_an_empty_library_is_empty_not_an_error() {
+        let (db, dir) = temp_db();
+        assert!(db.kb_search("随便什么", 5).unwrap().is_empty());
+        // 空查询也不该报错
+        assert!(db.kb_search("   ", 5).unwrap().is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
 

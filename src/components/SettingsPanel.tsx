@@ -11,6 +11,14 @@ import {
 import { sortModels } from "../lib/models";
 import { blankRole } from "../lib/roles";
 import { formatDiagnostics, hasProblems } from "../lib/diagnostics";
+import {
+  describeDocument,
+  describeHit,
+  describeStats,
+  kbFileKind,
+  previewText,
+  titleFromFileName,
+} from "../lib/kb";
 import { toolLabel } from "../lib/tools";
 import {
   barWidth,
@@ -25,15 +33,16 @@ import { useChat } from "../stores/chat";
 import { applyAppearance, previewAppearance, useConfig } from "../stores/config";
 import { useProviders } from "../stores/providers";
 import { useUi } from "../stores/ui";
-import type { Diagnostics, RolePreset, UsageReport } from "../types";
+import type { Diagnostics, KbDocument, KbHit, KbStats, RolePreset, UsageReport } from "../types";
 import { CopyButton } from "./CopyButton";
 
-type Tab = "models" | "appearance" | "general" | "data" | "about";
+type Tab = "models" | "appearance" | "general" | "kb" | "data" | "about";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "models", label: "模型" },
   { id: "appearance", label: "对话" },
   { id: "general", label: "通用" },
+  { id: "kb", label: "知识库" },
   { id: "data", label: "数据" },
   { id: "about", label: "关于" },
 ];
@@ -66,6 +75,7 @@ export function SettingsPanel() {
           {tab === "models" ? <ModelsTab /> : null}
           {tab === "appearance" ? <AppearanceTab /> : null}
           {tab === "general" ? <GeneralTab /> : null}
+          {tab === "kb" ? <KnowledgeTab /> : null}
           {tab === "data" ? <DataTab /> : null}
           {tab === "about" ? <AboutTab /> : null}
         </div>
@@ -1194,6 +1204,249 @@ function UsagePanel() {
       ) : (
         <div className="settings-hint">读取中…</div>
       )}
+    </div>
+  );
+}
+
+/** 把文件读成 data URL；失败返回 null（不抛，让调用方跳过这个文件）。 */
+function readFileAsDataUrl(file: File): Promise<string | null> {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = () =>
+      resolve(typeof reader.result === "string" ? reader.result : null);
+    reader.onerror = () => resolve(null);
+    reader.readAsDataURL(file);
+  });
+}
+
+/**
+ * 知识库页：导入 / 管理 / 试检索。
+ *
+ * 三条设计：
+ * - **导入后立刻能试检索**：用户不知道 BM25 是什么，但「我搜一下看看有没有
+ *   找对」是他能判断的。所以这里放一个检索框，而不是只让他相信索引建好了。
+ * - **明确告诉模型能用到它**：导入完给一句「模型在回答时会自动检索」——
+ *   否则用户不知道这东西导进去有什么用。
+ * - 删除是不可撤销的（会连切片与倒排一起删），所以二次确认。
+ */
+function KnowledgeTab() {
+  const pushNotice = useUi((s) => s.pushNotice);
+  const [docs, setDocs] = useState<KbDocument[]>([]);
+  const [stats, setStats] = useState<KbStats | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [query, setQuery] = useState("");
+  const [hits, setHits] = useState<KbHit[] | null>(null);
+  const [pasteOpen, setPasteOpen] = useState(false);
+  const [pasteTitle, setPasteTitle] = useState("");
+  const [pasteText, setPasteText] = useState("");
+  const fileInput = useRef<HTMLInputElement>(null);
+
+  const refresh = async () => {
+    try {
+      const [list, overview] = await Promise.all([api.kbList(), api.kbStats()]);
+      setDocs(list);
+      setStats(overview);
+    } catch (e) {
+      pushNotice(`读取知识库失败：${e}`);
+    }
+  };
+
+  useEffect(() => {
+    void refresh();
+    // 只在首次打开时拉一次；增删之后自己再调 refresh
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const importFiles = async (picked: File[]) => {
+    setBusy(true);
+    for (const file of picked) {
+      const kind = kbFileKind(file.name);
+      if (kind === null) {
+        pushNotice(`「${file.name}」不能收进知识库（支持 Office 文档与常见纯文本）`);
+        continue;
+      }
+      try {
+        if (kind === "office") {
+          const dataUrl = await readFileAsDataUrl(file);
+          if (dataUrl === null) {
+            pushNotice(`「${file.name}」读取失败`);
+            continue;
+          }
+          await api.kbAddDocument(file.name, dataUrl);
+        } else {
+          const text = await file.text();
+          await api.kbAddText(titleFromFileName(file.name), file.name, text);
+        }
+      } catch (e) {
+        pushNotice(`「${file.name}」导入失败：${e}`);
+      }
+    }
+    setBusy(false);
+    await refresh();
+  };
+
+  return (
+    <div className="settings-section">
+      <div className="settings-hint">{describeStats(stats)}</div>
+
+      <div className="field">
+        <span>导入文档</span>
+        <div className="danger-row">
+          <button
+            className="ghost-button"
+            disabled={busy}
+            onClick={() => fileInput.current?.click()}
+          >
+            {busy ? "处理中…" : "选择文件"}
+          </button>
+          <button className="ghost-button" onClick={() => setPasteOpen((v) => !v)}>
+            {pasteOpen ? "取消粘贴" : "粘贴文本"}
+          </button>
+        </div>
+        <input
+          ref={fileInput}
+          type="file"
+          multiple
+          style={{ display: "none" }}
+          onChange={(e) => {
+            const picked = Array.from(e.target.files ?? []);
+            if (picked.length > 0) void importFiles(picked);
+            // 清掉 value，否则再选同一个文件不触发 change
+            e.target.value = "";
+          }}
+        />
+        <div className="settings-hint">
+          支持 Word / Excel / PPT 与 txt、md、代码、csv 等纯文本。
+          导入后在聊天里打开<b>工具开关</b>，模型就能自己检索这些资料。
+        </div>
+
+        {pasteOpen ? (
+          <>
+            <input
+              className="kb-title"
+              placeholder="标题（用来在回答里标来源）"
+              value={pasteTitle}
+              onChange={(e) => setPasteTitle(e.target.value)}
+            />
+            <textarea
+              className="kb-paste"
+              rows={5}
+              placeholder="把要收进知识库的文字粘到这里…"
+              value={pasteText}
+              onChange={(e) => setPasteText(e.target.value)}
+            />
+            <button
+              className="ghost-button"
+              disabled={busy || pasteText.trim().length === 0}
+              onClick={async () => {
+                setBusy(true);
+                try {
+                  await api.kbAddText(
+                    pasteTitle.trim() || `粘贴的文本 ${new Date().toLocaleString()}`,
+                    "",
+                    pasteText,
+                  );
+                  setPasteText("");
+                  setPasteTitle("");
+                  setPasteOpen(false);
+                  await refresh();
+                } catch (e) {
+                  pushNotice(`导入失败：${e}`);
+                } finally {
+                  setBusy(false);
+                }
+              }}
+            >
+              收进知识库
+            </button>
+          </>
+        ) : null}
+      </div>
+
+      <div className="field">
+        <span>试搜一下（看看索引建得对不对）</span>
+        <div className="danger-row">
+          <input
+            className="kb-title"
+            placeholder="输入关键词，例如「全局热键」"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                void api
+                  .kbSearch(query, 5)
+                  .then(setHits)
+                  .catch((err) => pushNotice(`检索失败：${err}`));
+              }
+            }}
+          />
+          <button
+            className="ghost-button"
+            disabled={query.trim().length === 0}
+            onClick={() =>
+              void api
+                .kbSearch(query, 5)
+                .then(setHits)
+                .catch((err) => pushNotice(`检索失败：${err}`))
+            }
+          >
+            检索
+          </button>
+        </div>
+        {hits !== null ? (
+          hits.length === 0 ? (
+            <div className="settings-hint">没有命中。换个说法试试（检索是按词匹配的）。</div>
+          ) : (
+            <div className="kb-hits">
+              {hits.map((hit) => (
+                <div className="kb-hit" key={hit.chunkId}>
+                  <div className="kb-hit-head">{describeHit(hit)}</div>
+                  <div className="kb-hit-text">{previewText(hit.text)}</div>
+                </div>
+              ))}
+            </div>
+          )
+        ) : null}
+      </div>
+
+      <div className="field">
+        <span>已收录（{docs.length}）</span>
+        {docs.length === 0 ? (
+          <div className="settings-hint">还没有文档。</div>
+        ) : (
+          <div className="kb-docs">
+            {docs.map((doc) => (
+              <div className="kb-doc" key={doc.id}>
+                <span className="kb-doc-title" title={doc.title}>
+                  {doc.title}
+                </span>
+                <span className="kb-doc-meta">{describeDocument(doc)}</span>
+                <button
+                  className="role-delete"
+                  title="从知识库里删除（不可撤销）"
+                  onClick={async () => {
+                    if (
+                      !window.confirm(
+                        `从知识库删除「${doc.title}」？\n\n它的切片与索引会一起删除，不可撤销。`,
+                      )
+                    ) {
+                      return;
+                    }
+                    try {
+                      await api.kbDelete(doc.id);
+                      await refresh();
+                    } catch (e) {
+                      pushNotice(`删除失败：${e}`);
+                    }
+                  }}
+                >
+                  删除
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

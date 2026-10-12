@@ -117,11 +117,43 @@ mod tests {
 
         let payload = "浮语剪贴板往返测试 · fuyu clipboard round-trip";
         write_clipboard(payload).expect("写入剪贴板应当成功");
-        assert_eq!(
-            clipboard.get_text().expect("读回剪贴板应当成功"),
-            payload,
-            "写进去和读出来的必须一模一样"
-        );
+
+        // 读回来要**重试几次**（剪贴板的占用是瞬时的），并且区分两种情况：
+        //
+        // - 读到了内容但**不是**写入的那份 → 这是**真 bug**（产品的写入路径
+        //   没生效），必须让测试红；
+        // - 一次都没读到（全是 `ContentNotAvailable`）→ 环境不可用，跳过。
+        //
+        // 为什么不能简单地「失败就跳过」：那等于把测试的牙齿拔掉 ——
+        // 写入路径要是真坏了，也会被当成环境问题糊过去。
+        // 也不能「失败就红」：这台机器上有个卡死的 SystemSettings 占着剪贴板
+        // （PowerShell 自己读写也失败），会让一条与环境无关的测试随机变红。
+        let mut saw_any_read = false;
+        let mut mismatch: Option<String> = None;
+        for _ in 0..6 {
+            match clipboard.get_text() {
+                Ok(text) => {
+                    saw_any_read = true;
+                    if text == payload {
+                        mismatch = None;
+                        break;
+                    }
+                    mismatch = Some(text);
+                }
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(40)),
+            }
+        }
+
+        if let Some(got) = mismatch {
+            panic!("写进去和读出来的必须一模一样：写入 {payload:?}，读回 {got:?}");
+        }
+        if !saw_any_read {
+            eprintln!("跳过：剪贴板当前不可读（通常是有别的进程正占着它）");
+            if let Some(previous) = previous {
+                let _ = clipboard.set_text(previous);
+            }
+            return;
+        }
 
         // 还原用户原来的剪贴板，失败也不该让测试挂掉。
         if let Some(previous) = previous {

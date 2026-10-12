@@ -64,12 +64,34 @@ pub struct ToolDefinition {
     pub exfiltrates: bool,
 }
 
+/// 哪些「有条件」的工具该下发给模型。
+///
+/// 为什么做成结构体而不是继续加 bool 参数：条件工具会越来越多（联网搜索、
+/// 知识库检索、将来的 MCP），每加一个就要改一遍所有调用点的签名，而且
+/// `tool_definitions(true)` 这种写法，过一阵就没人记得那个 `true` 是什么了。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ToolAvailability {
+    /// 配了 SearXNG 端点才下发 `web_search`。
+    pub web_search: bool,
+    /// 知识库里有文档才下发 `search_knowledge_base`。
+    pub knowledge_base: bool,
+}
+
+impl ToolAvailability {
+    /// 全部可用。给「按名字查工具定义」和测试用。
+    pub fn all() -> Self {
+        Self {
+            web_search: true,
+            knowledge_base: true,
+        }
+    }
+}
+
 /// 内置工具清单。加新工具 = 这里加一项 + [`execute`] 加一个分支。
 ///
-/// `web_search_enabled` 为假时**不下发** `web_search`：模型看不到它，
-/// 也就不会去调一个没配置的服务。工具清单跟着配置走，而不是让工具
-/// 自己报错 —— 后者会白烧一轮 token。
-pub fn tool_definitions(web_search_enabled: bool) -> Vec<ToolDefinition> {
+/// 条件工具在条件不满足时**不下发**：模型看不到它，也就不会去调一个没配置
+/// 的服务。工具清单跟着配置走，而不是让工具自己报错 —— 后者会白烧一轮 token。
+pub fn tool_definitions(availability: ToolAvailability) -> Vec<ToolDefinition> {
     let mut tools = vec![
         ToolDefinition {
             name: "get_current_time",
@@ -140,7 +162,7 @@ pub fn tool_definitions(web_search_enabled: bool) -> Vec<ToolDefinition> {
         },
     ];
 
-    if web_search_enabled {
+    if availability.web_search {
         tools.push(ToolDefinition {
             name: "web_search",
             description:
@@ -163,15 +185,42 @@ pub fn tool_definitions(web_search_enabled: bool) -> Vec<ToolDefinition> {
         });
     }
 
+    if availability.knowledge_base {
+        tools.push(ToolDefinition {
+            name: "search_knowledge_base",
+            description:
+                "在用户自己导入的本地知识库里检索（BM25 全文检索），返回最相关的若干片段与来源文档。\
+                 当问题涉及用户导入的资料、笔记、手册时使用；它只能看到用户已经导入的内容。",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "检索关键词或一句话问题"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "返回几个片段（1-20，默认 5）"
+                    }
+                },
+                "required": ["query"],
+                "additionalProperties": false
+            }),
+            // 纯本地检索：数据不出机器，也不碰系统资源，所以不敏感、不过滤外发。
+            sensitive: false,
+            exfiltrates: false,
+        });
+    }
+
     tools
 }
 
 /// 把工具转成 OpenAI `tools` 数组。
 ///
 /// 只导出 name / description / parameters —— 策略字段绝不发给模型。
-pub fn to_openai_tools(web_search_enabled: bool) -> Value {
+pub fn to_openai_tools(availability: ToolAvailability) -> Value {
     Value::Array(
-        tool_definitions(web_search_enabled)
+        tool_definitions(availability)
             .iter()
             .map(|tool| {
                 json!({
@@ -188,9 +237,11 @@ pub fn to_openai_tools(web_search_enabled: bool) -> Value {
 }
 
 pub fn find(name: &str) -> Option<ToolDefinition> {
-    // 搜全部（含按配置隐藏的 web_search）：这里只回答「这个名字是不是内置
-    // 工具」，能不能真正执行由 `execute` 决定。
-    tool_definitions(true).into_iter().find(|t| t.name == name)
+    // 搜全部（含按配置隐藏的 web_search / search_knowledge_base）：
+    // 这里只回答「这个名字是不是内置工具」，能不能真正执行由 `execute` 决定。
+    tool_definitions(ToolAvailability::all())
+        .into_iter()
+        .find(|t| t.name == name)
 }
 
 /// 工具执行所需的运行时依赖。
@@ -205,6 +256,11 @@ pub struct ToolContext {
     /// 「聊天能通、但抓网页和搜索全失败」—— 而且工具会去直连，
     /// 在必须走代理的网络里等于完全不可用。
     pub proxy_url: Option<String>,
+    /// 知识库句柄（库里没有文档时为 `None`）。
+    ///
+    /// `Database` 内部是 `Arc<Mutex<Connection>>`，克隆很便宜；
+    /// 传进来的目的是让检索工具能直接查库，而不是再包一层服务。
+    pub knowledge_base: Option<crate::storage::database::Database>,
 }
 
 /// 执行一个工具。`args` 是模型给的参数（已经过 JSON 解析）。
@@ -222,6 +278,7 @@ pub async fn execute(name: &str, args: &Value, ctx: &ToolContext) -> ToolResult 
         "web_search" => {
             super::web::run_web_search(ctx.search_endpoint.as_deref(), args, proxy).await
         }
+        "search_knowledge_base" => search_knowledge_base(args, ctx.knowledge_base.as_ref()),
         other => ToolResult::error(format!("未知工具：{other}")),
     }
 }
@@ -235,6 +292,51 @@ fn get_current_time() -> ToolResult {
         now.format("%Y-%m-%d %H:%M:%S"),
         now.format("%A")
     ))
+}
+
+/// 知识库检索工具。
+///
+/// 输出刻意带上**来源与位置**（文档标题 + 第几片）：模型引用时能说清
+/// 「这来自哪份资料的哪一段」，用户也才能核对。
+///
+/// 刻意**不把 score 发给模型**：一个 `0.8735` 之类的数字对它没有意义，
+/// 只会被原样抄进回答里（「根据资料（相关度 0.87）…」），看着像那么回事，
+/// 其实是在展示一个对读者毫无信息量的内部指标。
+fn search_knowledge_base(
+    args: &Value,
+    db: Option<&crate::storage::database::Database>,
+) -> ToolResult {
+    let Some(db) = db else {
+        return ToolResult::error("知识库还没有内容（可先在「设置 → 知识库」里导入文档）");
+    };
+    let query = match args.get("query").and_then(Value::as_str) {
+        Some(q) if !q.trim().is_empty() => q,
+        _ => return ToolResult::error("缺少 query 参数"),
+    };
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(crate::kb::DEFAULT_SEARCH_LIMIT as u64) as usize;
+
+    match db.kb_search(query, limit) {
+        Ok(hits) if hits.is_empty() => {
+            ToolResult::ok("知识库里没有找到相关内容。（这不代表用户没问过，换几个关键词再试）")
+        }
+        Ok(hits) => {
+            let mut out = String::new();
+            for (index, hit) in hits.iter().enumerate() {
+                out.push_str(&format!(
+                    "【{}】{}（第 {} 片）\n{}\n\n",
+                    index + 1,
+                    hit.title,
+                    hit.ordinal,
+                    hit.text
+                ));
+            }
+            ToolResult::ok(out.trim_end())
+        }
+        Err(e) => ToolResult::error(format!("知识库检索失败：{e}")),
+    }
 }
 
 fn calculator(args: &Value) -> ToolResult {
@@ -402,11 +504,12 @@ mod tests {
         ToolContext {
             search_endpoint: None,
             proxy_url: None,
+            knowledge_base: None,
         }
     }
 
-    fn names(web_search_enabled: bool) -> Vec<&'static str> {
-        tool_definitions(web_search_enabled)
+    fn names(availability: ToolAvailability) -> Vec<&'static str> {
+        tool_definitions(availability)
             .into_iter()
             .map(|tool| tool.name)
             .collect()
@@ -415,8 +518,8 @@ mod tests {
     #[test]
     fn web_search_is_hidden_until_it_is_configured() {
         // 没配搜索服务时不下发这个工具：模型看不到，就不会白烧一轮去调它。
-        assert!(!names(false).contains(&"web_search"));
-        assert!(names(true).contains(&"web_search"));
+        assert!(!names(ToolAvailability::default()).contains(&"web_search"));
+        assert!(names(ToolAvailability::all()).contains(&"web_search"));
         // 其它工具不受影响。
         for always in [
             "get_current_time",
@@ -425,7 +528,10 @@ mod tests {
             "write_clipboard_text",
             "fetch_webpage",
         ] {
-            assert!(names(false).contains(&always), "{always} 应当始终可用");
+            assert!(
+                names(ToolAvailability::default()).contains(&always),
+                "{always} 应当始终可用"
+            );
         }
     }
 
@@ -462,8 +568,74 @@ mod tests {
     }
 
     #[test]
+    fn knowledge_base_tool_is_hidden_until_the_library_has_documents() {
+        // 与 web_search 同一个原则：库是空的就不下发 —— 否则模型会去调一个
+        // 必然空手而归的工具，白烧一轮 token。
+        assert!(!names(ToolAvailability::default()).contains(&"search_knowledge_base"));
+        assert!(names(ToolAvailability::all()).contains(&"search_knowledge_base"));
+    }
+
+    #[tokio::test]
+    async fn knowledge_base_tool_without_a_handle_explains_itself() {
+        // 工具被直接调用（绕过清单）时也要给人话，而不是 panic
+        let result = execute("search_knowledge_base", &json!({ "query": "x" }), &ctx()).await;
+        assert!(result.is_error);
+        assert!(result.content.contains("知识库"), "{}", result.content);
+    }
+
+    #[tokio::test]
+    async fn knowledge_base_tool_returns_sources_and_hides_scores() {
+        // 用真库跑一遍：输出要带来源（文档标题 + 第几片），
+        // 但**不能**带 score —— 那个数字会被模型原样抄进回答里。
+        let dir =
+            std::env::temp_dir().join(format!("floatai-kbtool-{}", crate::storage::new_id("")));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = crate::storage::database::Database::open(&dir.join("kb.db")).unwrap();
+        db.kb_add_document(
+            "浮语手册",
+            "manual.md",
+            "浮语是一个桌面 AI 助手。它支持全局热键 Alt+Space 唤出悬浮窗。",
+        )
+        .unwrap();
+        db.kb_add_document("无关文档", "other.md", "今天天气不错，适合出门散步。")
+            .unwrap();
+
+        let kb_ctx = ToolContext {
+            search_endpoint: None,
+            proxy_url: None,
+            knowledge_base: Some(db),
+        };
+        let result = execute(
+            "search_knowledge_base",
+            &json!({ "query": "全局热键" }),
+            &kb_ctx,
+        )
+        .await;
+
+        assert!(!result.is_error, "{}", result.content);
+        assert!(
+            result.content.contains("浮语手册"),
+            "应当带来源：{}",
+            result.content
+        );
+        assert!(
+            result.content.contains("第 1 片"),
+            "应当标出片号：{}",
+            result.content
+        );
+        assert!(result.content.contains("Alt+Space"));
+        assert!(
+            !result.content.contains("score"),
+            "不该把内部打分发给模型：{}",
+            result.content
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn openai_tools_never_leak_policy_fields() {
-        let tools = to_openai_tools(true);
+        let tools = to_openai_tools(ToolAvailability::all());
         let serialized = serde_json::to_string(&tools).unwrap();
         assert!(serialized.contains("\"name\""));
         assert!(!serialized.contains("sensitive"), "策略字段绝不能发给模型");
@@ -473,7 +645,7 @@ mod tests {
 
     #[tokio::test]
     async fn all_tools_are_discoverable_and_executable() {
-        for tool in tool_definitions(true) {
+        for tool in tool_definitions(ToolAvailability::all()) {
             assert!(find(tool.name).is_some(), "{} 应当能被找到", tool.name);
         }
         // 未知工具给出错误而非 panic。

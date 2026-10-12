@@ -13,6 +13,7 @@ mod commands;
 mod diagnostics;
 mod documents;
 mod errors;
+mod kb;
 mod models;
 mod state;
 mod storage;
@@ -76,6 +77,13 @@ pub fn run() {
             commands::autostart::started_minimized,
             // ---- 用量与费用
             commands::usage::usage_report,
+            // ---- 本地知识库
+            commands::kb::kb_list,
+            commands::kb::kb_stats,
+            commands::kb::kb_add_text,
+            commands::kb::kb_add_document,
+            commands::kb::kb_delete,
+            commands::kb::kb_search,
             // ---- 文档解析
             commands::documents::extract_document,
             // ---- 设置

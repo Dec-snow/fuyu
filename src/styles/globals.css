@@ -1233,6 +1233,84 @@ textarea {
   line-height: 1.5;
 }
 
+/* ---- 知识库 ---- */
+
+.kb-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  padding: 3px 7px;
+  border-radius: 7px;
+}
+
+.kb-paste {
+  margin-top: 6px;
+  width: 100%;
+  font-size: 11.5px;
+  line-height: 1.5;
+  border-radius: 8px;
+  resize: vertical;
+}
+
+.kb-docs,
+.kb-hits {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 5px;
+}
+
+.kb-doc {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 7px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.kb-doc-title {
+  font-weight: 600;
+  font-size: 12px;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kb-doc-meta {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--fg-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kb-hit {
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  /* 左侧色条：一眼看出这是检索结果而不是普通列表项 */
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  background: var(--code-bg);
+}
+
+.kb-hit-head {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  margin-bottom: 2px;
+}
+
+.kb-hit-text {
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--fg-dim);
+  word-break: break-word;
+}
+
 /* ---- 数据页：危险操作一排 + 诊断信息 ---- */
 
 .danger-row {

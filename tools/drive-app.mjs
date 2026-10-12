@@ -145,6 +145,33 @@ async function injectHelpers() {
  * 入口是标题栏上的 **⚙ 图标按钮**（不是文字按钮）—— 这一点是靠 `--dump`
  * 看出来的，而不是猜出来的。所有场景都走这个函数，改一处就够。
  */
+/**
+ * 用 **CDP 的真实输入事件**点一个按钮（而不是 JS 的 element.click()）。
+ *
+ * 为什么要区分这两者：JS 派发的事件是合成的，有些前端逻辑（或 React 的某些路径）
+ * 收不到；而 CDP 的 Input.dispatchMouseEvent 走的是浏览器真正的输入管线。
+ * 排查"点了没反应"时，这个区别能把问题一分为二。
+ */
+async function clickReal(target) {
+  const box = await evalJs(`
+    const el = ${target};
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2, text: (el.textContent ?? "").trim() };
+  `);
+  if (!box) return null;
+  for (const type of ["mousePressed", "mouseReleased"]) {
+    await send("Input.dispatchMouseEvent", {
+      type,
+      x: box.x,
+      y: box.y,
+      button: "left",
+      clickCount: 1,
+    });
+  }
+  return box.text;
+}
+
 async function openSettings() {
   await evalJs(`window.__dsh.clickText(".icon-button", "⚙"); return true;`);
   await waitFor(`document.querySelector(".settings-body")`, "设置面板出现", 10000);

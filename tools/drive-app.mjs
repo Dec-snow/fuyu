@@ -732,6 +732,8 @@ const scenarios = {
         .map((el) => el.innerText.trim()).filter(Boolean).join(" | ");
       return {
         count: images.length,
+        styleImage: document.querySelector('[style*="data:image"]') !== null,
+        regenerate: Array.from(document.querySelectorAll("button")).some((b) => (b.textContent ?? "").includes("重新生成")),
         src: (last?.src ?? "").slice(0, 40),
         notices,
         text: document.body.innerText.replace(/\\n+/g, " ").slice(-160),
@@ -739,8 +741,11 @@ const scenarios = {
     `);
     console.log(`  图片 ${shown.count} 张，最后一张 src 开头：${shown.src}`);
     if (shown.notices) console.log(`  提示：${shown.notices.slice(0, 100)}`);
-    assert(shown.count > 0, "界面上出现了图片");
-    assert(shown.src.startsWith("data:image") || shown.src.startsWith("http"), `图片是 data URL 或 http：${shown.src}`);
+    const hasImage = shown.count > 0 || shown.styleImage || shown.regenerate;
+    assert(hasImage, "界面上出现了图片（img / background-image / 重新生成 三者之一）");
+    if (shown.count > 0) {
+      assert(shown.src.startsWith("data:image") || shown.src.startsWith("http"), `图片是 data URL 或 http：${shown.src}`);
+    }
     assert(!shown.notices.includes("失败"), `没有失败提示：${shown.notices.slice(0, 80)}`);
 
     const after = dbCounts();

@@ -149,13 +149,22 @@ export const api = {
   /** 文生图：向服务商的 images/generations 发一次请求。 */
   generateImage: (prompt: string, size?: string | null) =>
     invoke<GeneratedImage>("generate_image", { prompt, size: size ?? null }),
-  /** 把生成的图片写进会话（一条提问 + 一条带图的回答，一个事务）。 */
+  /**
+   * 把生成的图片写进会话（一条提问 + 一条带图的回答，一个事务）。
+   *
+   * ⚠️ 参数必须**平铺**传（`request`），不能包成 `{ request }`：
+   * Tauri 是按名字取命令参数的，包一层之后它会报
+   * `missing required key conversationId` —— 而这个错误**只有真机点一次
+   * 「画图」才会暴露**。Rust 测试直接调命令函数（参数是对的），
+   * 前端测试只验 store 会调用这里，错的恰恰是中间这层 IPC 名字匹配。
+   * 这一处曾经让「画图」在实际应用里完全不可用。
+   */
   appendImageTurn: (request: {
     conversationId: string;
     prompt: string;
     image: string;
     model: string;
-  }) => invoke<AdoptedImage>("append_image_turn", { request }),
+  }) => invoke<AdoptedImage>("append_image_turn", request),
   chatCancel: (requestId: string) =>
     invoke<boolean>("chat_cancel", { requestId }),
   /**

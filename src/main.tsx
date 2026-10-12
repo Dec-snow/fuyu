@@ -1,4 +1,5 @@
 import React from "react";
+import { describeError } from "./lib/errors";
 import ReactDOM from "react-dom/client";
 
 import App from "./App";
@@ -115,7 +116,7 @@ async function boot() {
     bindCompareEvents();
     await startEventBridge();
   } catch (e) {
-    useUi.getState().pushNotice(`事件通道初始化失败：${e}`);
+    useUi.getState().pushNotice(`事件通道初始化失败：${describeError(e)}`);
   }
 
   onWindowShown(() => playEnter());
@@ -153,7 +154,7 @@ async function boot() {
     await useProviders.getState().load();
     await useChat.getState().bootstrap();
   } catch (e) {
-    useUi.getState().pushNotice(`载入配置失败：${e}`);
+    useUi.getState().pushNotice(`载入配置失败：${describeError(e)}`);
   }
 
   // 2.5) 启动时查一次更新。

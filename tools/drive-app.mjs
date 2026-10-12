@@ -16,6 +16,8 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+// 直接读 SQLite 来数消息条数：确认驱动跑完没留下测试数据（Node 24 自带）
+import { DatabaseSync } from "node:sqlite";
 
 const args = Object.fromEntries(
   process.argv.slice(2).map((a) => {
@@ -180,7 +182,191 @@ async function switchTab(label) {
   await new Promise((r) => setTimeout(r, 300));
 }
 
+/** 展开悬浮窗（精简工具栏只在浮动模式下出现）。 */
+async function expandWindow() {
+  await evalJs(`
+    const expand = window.__dsh.byText(".icon-button", "⤢");
+    if (expand) expand.click();
+    return true;
+  `);
+  await new Promise((r) => setTimeout(r, 500));
+}
+
+/**
+ * 数一下会话里有多少条消息（直接读 SQLite）。
+ *
+ * 用途：确认驱动跑完之后**没有留下测试数据** —— 例如画图失败时不该往会话里
+ * 塞半条记录。通过界面数不可靠（列表可能分页/折叠），直接读库最实在。
+ */
+function countMessages() {
+  try {
+    const db = new DatabaseSync(dbPath());
+    const row = db.prepare("SELECT COUNT(*) AS n FROM messages").get();
+    db.close();
+    return Number(row.n);
+  } catch (e) {
+    console.log(`  （数消息失败，跳过这项检查：${e.message}）`);
+    return -1;
+  }
+}
+
+function dbPath() {
+  return join(homedir(), "AppData", "Roaming", "com.floatai.desktop", "floatai.db");
+}
+
 const scenarios = {
+  /**
+   * 编写区的那几个控件是不是真的接上了状态。
+   *
+   * 这一条**不需要模型 Key**：验的是「控件在、可选、选了之后界面确实变了」。
+   * 真正发消息那条链路需要 Key，本场景不碰。
+   *
+   * 它要防的是「控件渲染出来了但没接线」：下拉框里能看到选项，
+   * 选了却没有反应 —— 这种问题单测覆盖不到（单测测的是 store，不是控件与 store 之间）。
+   */
+  async composerTools() {
+    await expandWindow();
+
+    const before = await evalJs(`
+      return {
+        selects: document.querySelectorAll("select").length,
+        skills: Array.from(document.querySelectorAll(".skill-picker option")).map((o) => o.textContent),
+        roles: Array.from(document.querySelectorAll(".role-picker option")).map((o) => o.textContent),
+        tools: (window.__dsh.byText(".tools-toggle", "工具")?.textContent ?? "").trim(),
+      };
+    `);
+    assert(before.selects >= 4, `展开后能看到 4 个下拉（服务商/模型/技能/角色），实际 ${before.selects} 个`);
+    assert(before.skills.includes("翻译"), `技能下拉里有内置技能：${before.skills.join("/")}`);
+    assert(before.roles.length >= 2, `角色下拉里有角色：${before.roles.join("/")}`);
+
+    // 选一个技能：界面上的选中值必须跟着变（说明控件 → store 通了）
+    const picked = await evalJs(`
+      const select = document.querySelector(".skill-picker");
+      const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value").set;
+      const option = Array.from(select.options).find((o) => o.textContent.includes("翻译"));
+      setter.call(select, option.value);
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+      return option.textContent;
+    `);
+    await new Promise((r) => setTimeout(r, 400));
+    const afterPick = await evalJs(`return document.querySelector(".skill-picker").value;`);
+    assert(afterPick !== "", `选了「${picked}」之后下拉的值不再是空`);
+
+    // 工具开关：点一下应当换文案（工具关 ↔ 工具开）
+    const toggled = await evalJs(`
+      const button = window.__dsh.byText(".tools-toggle", "工具");
+      if (!button) return null;
+      if (button.disabled) return "disabled";
+      button.click();
+      return "clicked";
+    `);
+    await new Promise((r) => setTimeout(r, 400));
+    const afterTools = await evalJs(`
+      return (window.__dsh.byText(".tools-toggle", "工具")?.textContent ?? "").trim();
+    `);
+    console.log(`  工具开关：${before.tools} → ${afterTools}（${toggled}）`);
+    assert(
+      toggled === "disabled" || afterTools !== before.tools,
+      toggled === "disabled" ? "工具开关是禁用状态（未配搜索端点，符合预期）" : "工具开关点一下会换状态",
+    );
+
+    // 「画图」：它可能不是「切换编写区状态」，而是打开一个带页签的面板
+    // （从对比面板的文字里能看到「对比 | 画图 | 一问多答」三个页签）。
+    // 所以先把按钮自身的状态看清楚，再看点击之后出现了什么。
+    const drawButton = await evalJs(`
+      const button = window.__dsh.byText(".compare-button", "画图");
+      return button
+        ? { found: true, disabled: button.disabled, title: button.title ?? "", text: button.textContent.trim() }
+        : { found: false };
+    `);
+    console.log(`  画图按钮：${JSON.stringify(drawButton)}`);
+    assert(drawButton.found, "编写区里有「画图」按钮");
+
+    const beforeDraw = await evalJs(`return document.body.innerText;`);
+    await evalJs(`window.__dsh.clickText(".compare-button", "画图"); return true;`);
+    await new Promise((r) => setTimeout(r, 600));
+    const drawState = await evalJs(`
+      const panels = Array.from(document.querySelectorAll('[class*="compare-panel"], [class*="draw"], [class*="image"]'));
+      const notices = Array.from(document.querySelectorAll(".notice, .toast"))
+        .map((el) => el.innerText.trim()).join(" | ");
+      return {
+        panels: panels.length,
+        classes: Array.from(new Set(panels.map((el) => el.className))).slice(0, 5),
+        notices,
+        head: panels.map((el) => el.innerText).join(" ").replace(/\\n+/g, " ").slice(0, 200),
+        changed: document.body.innerText !== ${JSON.stringify(beforeDraw)},
+      };
+    `);
+    console.log(`  点画图后：面板 ${drawState.panels} 个 ${drawState.classes.join("  ")}`);
+    if (drawState.notices) console.log(`  提示：${drawState.notices}`);
+    if (drawState.head) console.log(`  面板文字：${drawState.head}`);
+    assert(
+      drawState.changed || drawState.panels > 0 || drawState.notices.length > 0,
+      drawButton.disabled
+        ? "画图按钮是禁用的（未配画图模型，符合预期）"
+        : "点「画图」之后界面有反应（面板 / 提示 / 状态变化至少有一个）",
+    );
+
+    // 再往前走一步：填上描述再点「画图」。
+    // 没有配画图模型/Key 时它会失败，但**必须给出可理解的原因** ——
+    // 这一步验的就是「失败有没有说清楚」，同时确认不会往会话里塞半条记录。
+    const messagesBefore = countMessages();
+    await evalJs(`
+      const box = document.querySelector("textarea");
+      window.__dsh.setValue(box, "端到端验证：画一只猫");
+      return true;
+    `);
+    await new Promise((r) => setTimeout(r, 200));
+    await evalJs(`window.__dsh.clickText(".compare-button", "画图"); return true;`);
+    await new Promise((r) => setTimeout(r, 2500));
+
+    const afterDraw2 = await evalJs(`
+      const notices = Array.from(document.querySelectorAll(".notice, .toast"))
+        .map((el) => el.innerText.trim()).join(" | ");
+      return { notices, tail: document.body.innerText.replace(/\\n+/g, " ").slice(-180) };
+    `);
+    console.log(`  填了描述再点画图，提示：${afterDraw2.notices || "(没有提示)"}`);
+    assert(
+      afterDraw2.notices.length > 0,
+      "没配画图模型时给了明确提示（而不是静默失败）",
+    );
+    assert(
+      afterDraw2.notices.includes("生成图片失败"),
+      "已经填了描述，所以走到了真正的生成那一步",
+    );
+    // 回归防线：后端错误是结构化对象，模板字符串会拼成 [object Object]。
+    // 这个 bug 真机抓到过（界面上就是「生成图片失败：[object Object]」）。
+    assert(
+      !afterDraw2.notices.includes("[object Object]"),
+      `错误提示是可读的，不是 [object Object]：${afterDraw2.notices.slice(0, 80)}`,
+    );
+
+    // 关键：失败不能往会话里留下半条记录
+    const messagesAfter = countMessages();
+    assert(
+      messagesAfter === messagesBefore,
+      `画图失败没有污染会话（消息数 ${messagesBefore} → ${messagesAfter}）`,
+    );
+
+    // 把输入框清干净，别留给后续场景
+    await evalJs(`window.__dsh.setValue(document.querySelector("textarea"), ""); return true;`);
+
+    // 「对比」：应当出现对比面板
+    await evalJs(`window.__dsh.clickText(".compare-button", "对比"); return true;`);
+    await new Promise((r) => setTimeout(r, 600));
+    const compare = await evalJs(`
+      const nodes = Array.from(document.querySelectorAll('[class*="compare"]'));
+      return {
+        count: nodes.length,
+        classes: Array.from(new Set(nodes.map((el) => el.className))).slice(0, 4),
+        text: nodes.map((el) => el.innerText).join(" | ").replace(/\\n+/g, " ").slice(0, 160),
+      };
+    `);
+    console.log(`  对比相关元素 ${compare.count} 个：${compare.classes.join("  ")}`);
+    if (compare.text) console.log(`  对比面板文字：${compare.text}`);
+    assert(compare.count > 0, "点「对比」之后出现了对比面板");
+  },
+
   /**
    * 设置项**真的落盘**了吗。
    *
@@ -524,6 +710,15 @@ function buildMinimalPdf(text) {
 
 /** `--dump`：把界面上有什么打出来。写脚本时靠它找选择器，别猜。 */
 async function dump() {
+  // 默认是**浮动模式**，工具栏是精简的（只有文件/工具/对比/画图/发送）。
+  // 想看模型、角色、技能那几个选择器，得先展开 —— 否则会误判成「这些控件没有」。
+  await evalJs(`
+    const expand = window.__dsh.byText(".icon-button", "⤢");
+    if (expand) expand.click();
+    return true;
+  `);
+  await new Promise((r) => setTimeout(r, 600));
+
   const info = await evalJs(`
     return {
       title: document.title,

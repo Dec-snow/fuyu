@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { describeError } from "../lib/errors";
 
 import { visibleMessages } from "../lib/chat-state";
 import {
@@ -226,7 +227,7 @@ export function Composer() {
               .pushNotice(`「${file.name}」内容过长，已截断到 ${extracted.chars} 字`);
           }
         } catch (e) {
-          useUi.getState().pushNotice(`「${file.name}」解析失败：${e}`);
+          useUi.getState().pushNotice(`「${file.name}」解析失败：${describeError(e)}`);
         }
         continue;
       }

@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { describeError } from "../lib/errors";
 
 import {
   dropConversation,
@@ -752,7 +753,7 @@ export const useChat = create<ChatStore>((set, get) => {
         await get().selectConversation(convId);
         return true;
       } catch (e) {
-        set({ error: `生成图片失败：${e}` });
+        set({ error: `生成图片失败：${describeError(e)}` });
         return false;
       } finally {
         set({ submitting: false });

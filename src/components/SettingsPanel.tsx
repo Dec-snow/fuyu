@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { describeError } from "../lib/errors";
 
 import {
   clampFontSize,
@@ -1352,7 +1353,7 @@ function UsagePanel() {
     void api
       .usageReport(days)
       .then(setReport)
-      .catch((e) => pushNotice(`读取用量失败：${e}`));
+      .catch((e) => pushNotice(`读取用量失败：${describeError(e)}`));
   }, [days, pushNotice]);
 
   const max = report ? maxDayTokens(report.days) : 0;
@@ -1462,7 +1463,7 @@ function KnowledgeTab() {
       setDocs(list);
       setStats(overview);
     } catch (e) {
-      pushNotice(`读取知识库失败：${e}`);
+      pushNotice(`读取知识库失败：${describeError(e)}`);
     }
   };
 
@@ -1493,7 +1494,7 @@ function KnowledgeTab() {
           await api.kbAddText(titleFromFileName(file.name), file.name, text);
         }
       } catch (e) {
-        pushNotice(`「${file.name}」导入失败：${e}`);
+        pushNotice(`「${file.name}」导入失败：${describeError(e)}`);
       }
     }
     setBusy(false);
@@ -1566,7 +1567,7 @@ function KnowledgeTab() {
                   setPasteOpen(false);
                   await refresh();
                 } catch (e) {
-                  pushNotice(`导入失败：${e}`);
+                  pushNotice(`导入失败：${describeError(e)}`);
                 } finally {
                   setBusy(false);
                 }
@@ -1591,7 +1592,7 @@ function KnowledgeTab() {
                 void api
                   .kbSearch(query, 5)
                   .then(setHits)
-                  .catch((err) => pushNotice(`检索失败：${err}`));
+                  .catch((err) => pushNotice(`检索失败：${describeError(err)}`));
               }
             }}
           />
@@ -1602,7 +1603,7 @@ function KnowledgeTab() {
               void api
                 .kbSearch(query, 5)
                 .then(setHits)
-                .catch((err) => pushNotice(`检索失败：${err}`))
+                .catch((err) => pushNotice(`检索失败：${describeError(err)}`))
             }
           >
             检索
@@ -1651,7 +1652,7 @@ function KnowledgeTab() {
                       await api.kbDelete(doc.id);
                       await refresh();
                     } catch (e) {
-                      pushNotice(`删除失败：${e}`);
+                      pushNotice(`删除失败：${describeError(e)}`);
                     }
                   }}
                 >
@@ -1694,7 +1695,7 @@ function MemorySection() {
       setList(memories);
       setStats(overview);
     } catch (e) {
-      pushNotice(`读取记忆失败：${e}`);
+      pushNotice(`读取记忆失败：${describeError(e)}`);
     }
   };
 
@@ -1744,7 +1745,7 @@ function MemorySection() {
                   if (outcome.merged) pushNotice("和已有的一条几乎一样，已合并更新");
                   await refresh();
                 })
-                .catch((err) => pushNotice(`添加失败：${err}`));
+                .catch((err) => pushNotice(`添加失败：${describeError(err)}`));
             }
           }}
         />
@@ -1759,7 +1760,7 @@ function MemorySection() {
                 if (outcome.merged) pushNotice("和已有的一条几乎一样，已合并更新");
                 await refresh();
               })
-              .catch((err) => pushNotice(`添加失败：${err}`))
+              .catch((err) => pushNotice(`添加失败：${describeError(err)}`))
           }
         >
           记下来
@@ -1781,7 +1782,7 @@ function MemorySection() {
                   void api
                     .memoryDelete(memory.id)
                     .then(refresh)
-                    .catch((e) => pushNotice(`删除失败：${e}`))
+                    .catch((e) => pushNotice(`删除失败：${describeError(e)}`))
                 }
               >
                 删除
@@ -1802,7 +1803,7 @@ function MemorySection() {
               void api
                 .memoryRelevant(probe)
                 .then(setHits)
-                .catch((err) => pushNotice(`试搜失败：${err}`));
+                .catch((err) => pushNotice(`试搜失败：${describeError(err)}`));
             }
           }}
         />
@@ -1813,7 +1814,7 @@ function MemorySection() {
             void api
               .memoryRelevant(probe)
               .then(setHits)
-              .catch((err) => pushNotice(`试搜失败：${err}`))
+              .catch((err) => pushNotice(`试搜失败：${describeError(err)}`))
           }
         >
           试试
@@ -1854,7 +1855,7 @@ function DataTab() {
     try {
       setExported(await api.exportHistory());
     } catch (e) {
-      pushNotice(`导出失败：${e}`);
+      pushNotice(`导出失败：${describeError(e)}`);
     } finally {
       setBusy(false);
     }
@@ -1875,7 +1876,7 @@ function DataTab() {
           (result.skipped > 0 ? `，跳过 ${result.skipped} 个已存在的会话` : ""),
       );
     } catch (e) {
-      pushNotice(`导入失败：${e}`);
+      pushNotice(`导入失败：${describeError(e)}`);
     } finally {
       setBusy(false);
       // 清掉 input 的值，否则再选**同一个文件**不会触发 change
@@ -2028,7 +2029,7 @@ function AutostartField() {
       setActual(await api.autostartStatus().catch(() => next));
     } catch (e) {
       // 系统那边没成功就**不**改界面状态：否则会出现「勾上了、其实没生效」。
-      pushNotice(`设置开机自启失败：${e}`);
+      pushNotice(`设置开机自启失败：${describeError(e)}`);
       setActual(await api.autostartStatus().catch(() => null));
     } finally {
       setBusy(false);
@@ -2063,7 +2064,7 @@ function DiagnosticsPanel() {
     try {
       setData(await api.diagnostics());
     } catch (e) {
-      pushNotice(`读取诊断信息失败：${e}`);
+      pushNotice(`读取诊断信息失败：${describeError(e)}`);
     }
   };
 
@@ -2149,7 +2150,7 @@ function McpSection() {
     try {
       setStatuses(await api.mcpStatus());
     } catch (e) {
-      pushNotice(`扫描 MCP 服务器失败：${e}`);
+      pushNotice(`扫描 MCP 服务器失败：${describeError(e)}`);
     } finally {
       setBusy(false);
     }
@@ -2322,7 +2323,7 @@ function UpdateSection() {
       await api.openUpdatePage(url);
     } catch (e) {
       // 打不开浏览器至少要把话说清楚，用户还能自己复制地址
-      pushNotice(`打不开浏览器：${e}`);
+      pushNotice(`打不开浏览器：${describeError(e)}`);
     }
   };
 

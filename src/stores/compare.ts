@@ -7,6 +7,7 @@
 // 这个 store 自己管路由：每个目标一个 requestId，事件按 requestId 分发。
 
 import { create } from "zustand";
+import { describeError } from "../lib/errors";
 
 import {
   canAdopt,
@@ -165,7 +166,7 @@ export const useCompare = create<CompareStore>((set, get) => ({
         notice: "已采用，写进当前会话了",
       }));
     } catch (e) {
-      set({ notice: `采用失败：${e}` });
+      set({ notice: `采用失败：${describeError(e)}` });
     }
   },
 

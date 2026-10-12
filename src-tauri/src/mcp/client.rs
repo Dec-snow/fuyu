@@ -108,6 +108,8 @@ pub struct McpManager {
     sessions: Mutex<HashMap<String, Arc<Mutex<Session>>>>,
     /// 上次发现的工具（同步可读）。
     tools: Mutex<HashMap<String, Vec<McpTool>>>,
+    /// 上次扫描时的服务器配置 —— 调用时要靠它拿到「启动哪个进程」。
+    servers: Mutex<Vec<McpServerConfig>>,
     logs: LogBuffer,
 }
 
@@ -116,6 +118,7 @@ impl McpManager {
         Self {
             sessions: Mutex::new(HashMap::new()),
             tools: Mutex::new(HashMap::new()),
+            servers: Mutex::new(Vec::new()),
             logs,
         }
     }
@@ -174,6 +177,7 @@ impl McpManager {
         // 被关掉或删掉的服务器的工具必须一起清掉，否则它们会继续出现在
         // 模型可见的工具清单里，而调用时又找不到会话。
         *self.tools.lock().await = discovered;
+        *self.servers.lock().await = servers.to_vec();
         statuses
     }
 
@@ -332,6 +336,38 @@ impl McpManager {
             }
             _ => Err(AppError::new(code::SERVER, "MCP 调用没有拿到应答")),
         }
+    }
+
+    /// 按**合格工具名**（`mcp__服务__工具`）调用，自己解析出是哪个服务器的哪个工具。
+    ///
+    /// 执行侧只拿得到名字（模型的 tool_call 里只有名字），所以解析必须在这里做。
+    /// 注意**不能**从名字反解原始工具名：长名字被截断过，反解会指到不存在的工具。
+    /// 所以原始名从缓存里那份 `McpTool` 取 —— 这也是缓存必须留着的另一个理由。
+    pub async fn call_qualified(
+        &self,
+        qualified: &str,
+        args: &serde_json::Value,
+    ) -> AppResult<String> {
+        let tool = self
+            .find_tool(qualified)
+            .await
+            .ok_or_else(|| AppError::invalid(format!("找不到 MCP 工具：{qualified}")))?;
+
+        let server_id = protocol::split_tool_name(qualified)
+            .map(|(server, _)| server.to_string())
+            .ok_or_else(|| AppError::invalid(format!("工具名格式不对：{qualified}")))?;
+        let server = {
+            let servers = self.servers.lock().await;
+            servers
+                .iter()
+                .find(|s| s.id == server_id)
+                .cloned()
+                .ok_or_else(|| {
+                    AppError::invalid(format!("MCP 服务端 {server_id} 已经不在配置里了"))
+                })?
+        };
+
+        self.call(&server, &tool, args).await
     }
 
     /// 关掉所有会话（退出时用）。

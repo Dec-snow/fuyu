@@ -324,6 +324,10 @@ pub struct ToolContext {
     /// 全部意义所在，所以必须在服务端拦住（与文档解析的上限同一个道理：
     /// 前端的限制拦不住直接调命令的人）。
     pub allowed: Option<Vec<String>>,
+    /// MCP 工具的入口（没配 MCP 服务器时为 `None`）。
+    ///
+    /// MCP 工具不是内置的：名字在编译期不知道，执行时要靠它找到对应的服务端会话。
+    pub mcp: Option<std::sync::Arc<crate::mcp::McpManager>>,
 }
 
 /// 执行一个工具。`args` 是模型给的参数（已经过 JSON 解析）。
@@ -352,6 +356,16 @@ pub async fn execute(name: &str, args: &Value, ctx: &ToolContext) -> ToolResult 
         }
         "search_knowledge_base" => search_knowledge_base(args, ctx.knowledge_base.as_ref()),
         "remember" => remember(args, ctx.memory.as_ref()),
+        // MCP：名字带前缀，执行时要么找到会话、要么明确报错。
+        // 这里**不**做「找不到就当未知工具」的处理 —— 那样用户只会看到
+        // 「未知工具」，而这几乎总是「服务器没扫描 / 已经退出」，得说清楚。
+        name if crate::mcp::protocol::is_mcp_tool(name) => match ctx.mcp.as_ref() {
+            Some(manager) => match manager.call_qualified(name, args).await {
+                Ok(text) => ToolResult::ok(text),
+                Err(e) => ToolResult::error(format!("MCP 调用失败：{e}")),
+            },
+            None => ToolResult::error("这个 MCP 工具当前不可用（可能还没扫描，或服务器已停用）"),
+        },
         other => ToolResult::error(format!("未知工具：{other}")),
     }
 }
@@ -602,6 +616,7 @@ mod tests {
             knowledge_base: None,
             memory: None,
             allowed: None,
+            mcp: None,
         }
     }
 
@@ -703,6 +718,7 @@ mod tests {
             knowledge_base: Some(db),
             memory: None,
             allowed: None,
+            mcp: None,
         };
         let result = execute(
             "search_knowledge_base",
@@ -763,6 +779,7 @@ mod tests {
             knowledge_base: None,
             memory: Some(db.clone()),
             allowed: None,
+            mcp: None,
         };
 
         let first = execute(
@@ -844,6 +861,7 @@ mod tests {
             knowledge_base: None,
             memory: None,
             allowed: Some(vec!["calculator".to_string()]),
+            mcp: None,
         };
 
         let blocked = execute("get_current_time", &json!({}), &scoped).await;
@@ -854,6 +872,15 @@ mod tests {
         let allowed = execute("calculator", &json!({ "expression": "6 * 7" }), &scoped).await;
         assert!(!allowed.is_error, "{}", allowed.content);
         assert!(allowed.content.contains("42"));
+    }
+
+    #[tokio::test]
+    async fn an_mcp_tool_without_a_manager_explains_itself() {
+        // 缓存里没有这个工具 / 没扫描过时，必须说清楚原因 ——
+        // 只说「未知工具」会让用户以为是名字打错了
+        let result = execute("mcp__files__read_file", &json!({ "path": "/x" }), &ctx()).await;
+        assert!(result.is_error);
+        assert!(result.content.contains("MCP"), "{}", result.content);
     }
 
     #[test]
@@ -916,5 +943,127 @@ mod tests {
         let missing = execute("fetch_webpage", &json!({}), &ctx()).await;
         assert!(missing.is_error);
         assert!(missing.content.contains("url"));
+    }
+}
+
+/// 把**运行时发现**的工具（目前是 MCP）并进清单，再套用技能白名单。
+///
+/// 为什么不直接改 `tool_definitions`：内置工具是静态的，而 MCP 工具要等
+/// `tools/list` 回来才知道。两者在 `ToolContext` 里汇合，这里就是汇合点。
+///
+/// 白名单**在合并之后**才应用，所以技能可以点名一个 MCP 工具
+/// （「只用这个知识库服务」这种用法）。
+pub fn with_extra_tools(
+    availability: ToolAvailability,
+    extra: &[ToolDefinition],
+    whitelist: Option<&[String]>,
+) -> Vec<ToolDefinition> {
+    let mut tools = tools_for(availability, None);
+    tools.extend_from_slice(extra);
+    match whitelist {
+        None => tools,
+        Some(names) => tools
+            .into_iter()
+            .filter(|tool| names.contains(&tool.name))
+            .collect(),
+    }
+}
+
+/// 同上，但直接产出 OpenAI `tools` 数组。
+pub fn to_openai_tools_with_extra(
+    availability: ToolAvailability,
+    extra: &[ToolDefinition],
+    whitelist: Option<&[String]>,
+) -> Value {
+    // 没有额外工具时走原路 —— 两条路径的结果必须一模一样，
+    // 否则「配了 MCP」与「没配 MCP」会得到不同的内置工具清单（那是很隐蔽的 bug）。
+    if extra.is_empty() {
+        return to_openai_tools(availability, whitelist);
+    }
+    Value::Array(
+        with_extra_tools(availability, extra, whitelist)
+            .iter()
+            .map(|tool| {
+                json!({
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.parameters,
+                    }
+                })
+            })
+            .collect(),
+    )
+}
+
+/// 把一个 MCP 工具变成内置工具同款的 [`ToolDefinition`]。
+///
+/// **`sensitive` 与 `exfiltrates` 都是 true**，这是刻意的保守取值：
+/// MCP 服务端可以是**任意本地程序**（能读文件、能跑命令），我们无法知道它做了什么。
+/// 标注成「敏感」意味着每次调用都要用户点一次同意；标注成「会外发数据」意味着
+/// 调用之后再把上下文发给服务商之前会再确认一次。宁可多问一次，也不默认它是安全的。
+pub fn mcp_tool_definition(tool: &crate::mcp::McpTool, server_name: &str) -> ToolDefinition {
+    ToolDefinition {
+        name: tool.name.clone(),
+        description: format!("[MCP · {server_name}] {}", tool.description),
+        parameters: tool.parameters.clone(),
+        sensitive: true,
+        exfiltrates: true,
+    }
+}
+
+#[cfg(test)]
+mod extra_tool_tests {
+    use super::*;
+
+    fn mcp_like(name: &str) -> ToolDefinition {
+        ToolDefinition {
+            name: name.to_string(),
+            description: "外部工具".to_string(),
+            parameters: json!({ "type": "object", "properties": {} }),
+            sensitive: true,
+            exfiltrates: true,
+        }
+    }
+
+    #[test]
+    fn extra_tools_show_up_next_to_the_builtin_ones() {
+        let tools = with_extra_tools(
+            ToolAvailability::default(),
+            &[mcp_like("mcp__a__ping")],
+            None,
+        );
+        let names: Vec<String> = tools.into_iter().map(|t| t.name).collect();
+        assert!(names.contains(&"mcp__a__ping".to_string()));
+        assert!(names.contains(&"calculator".to_string()));
+    }
+
+    #[test]
+    fn a_skill_whitelist_applies_to_mcp_tools_too() {
+        // 「这次只用这一个外部工具」是合理需求，白名单必须在合并之后生效
+        let allow = vec!["mcp__a__ping".to_string()];
+        let tools = with_extra_tools(
+            ToolAvailability::default(),
+            &[mcp_like("mcp__a__ping"), mcp_like("mcp__a__other")],
+            Some(&allow),
+        );
+        let names: Vec<String> = tools.into_iter().map(|t| t.name).collect();
+        assert_eq!(names, vec!["mcp__a__ping".to_string()]);
+    }
+
+    #[test]
+    fn mcp_tools_are_marked_sensitive_and_exfiltrating() {
+        // MCP 服务端可以是任意本地程序，我们不知道它做了什么 —— 保守取值
+        let tool = crate::mcp::McpTool {
+            raw_name: "ping".to_string(),
+            name: "mcp__a__ping".to_string(),
+            description: "ping 一下".to_string(),
+            parameters: json!({ "type": "object", "properties": {} }),
+        };
+        let definition = mcp_tool_definition(&tool, "服务端甲");
+        assert!(definition.sensitive, "必须每次问一次用户");
+        assert!(definition.exfiltrates, "用完之后再发上下文要再确认");
+        assert!(definition.description.contains("服务端甲"));
     }
 }

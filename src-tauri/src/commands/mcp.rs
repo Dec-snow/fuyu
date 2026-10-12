@@ -15,6 +15,14 @@ use crate::storage::config::ConfigStore;
 
 static MANAGER: OnceLock<Arc<McpManager>> = OnceLock::new();
 
+/// 拿共享的管理器实例。
+///
+/// `chat_send` 那条链路要用同一个实例：扫描出来的工具缓存在它里面，
+/// 而执行工具时又要靠它找到会话。两个实例会导致「清单里有、调用时说找不到」。
+pub(crate) fn shared_manager(logs: &LogBuffer) -> Arc<McpManager> {
+    manager(logs)
+}
+
 fn manager(logs: &LogBuffer) -> Arc<McpManager> {
     MANAGER
         .get_or_init(|| Arc::new(McpManager::new(logs.clone())))
@@ -31,7 +39,10 @@ pub async fn mcp_status(
     config: State<'_, ConfigStore>,
     logs: tauri::State<'_, LogBuffer>,
 ) -> AppResult<Vec<McpServerStatus>> {
-    let servers = config.read(|cfg| cfg.mcp_servers.clone());
+    // 上限是真实护栏：每个服务器都是一个常驻子进程，而它们的工具会**全部**
+    // 出现在模型的工具清单里 —— 工具太多会明显拉低它挑对工具的概率。
+    let mut servers = config.read(|cfg| cfg.mcp_servers.clone());
+    servers.truncate(crate::mcp::MAX_SERVERS);
     let manager = manager(&logs);
     Ok(manager.refresh(&servers).await)
 }

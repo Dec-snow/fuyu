@@ -396,13 +396,29 @@ async fn run_stream(
         .as_ref()
         .filter(|s| s.restricts_tools())
         .map(|s| s.tools.clone());
+    // MCP：把上次扫描发现的工具并进清单。**没扫描过就是空的**，绝不在这里
+    // 现拉子进程 —— 那会让「发一条消息」可能等上几十秒（npx 首次要下载包）。
+    let mcp_manager = crate::commands::mcp::shared_manager(&logs);
+    let mcp_defs: Vec<registry::ToolDefinition> = mcp_manager
+        .cached_tools()
+        .await
+        .iter()
+        .map(|tool| {
+            // 标签用服务端 id：界面上显示的是用户起的名字，这里够用且不用再查一次配置
+            let server = crate::mcp::protocol::split_tool_name(&tool.name)
+                .map(|(server, _)| server.to_string())
+                .unwrap_or_default();
+            registry::mcp_tool_definition(tool, &server)
+        })
+        .collect();
     let tools = request.enable_tools.then(|| {
-        registry::to_openai_tools(
+        registry::to_openai_tools_with_extra(
             registry::ToolAvailability {
                 web_search: search_endpoint.is_some(),
                 knowledge_base: kb_available,
                 memory: memory_enabled,
             },
+            &mcp_defs,
             tool_whitelist.as_deref(),
         )
     });
@@ -413,6 +429,8 @@ async fn run_stream(
         // 免得出现「工具列表里没有、但直接调用却能跑」的不一致状态。
         knowledge_base: kb_available.then(|| db.clone()),
         memory: memory_enabled.then(|| db.clone()),
+        // MCP 工具的入口：执行时要靠它找到服务端会话
+        mcp: Some(mcp_manager.clone()),
         // 执行时也拦一道：模型可以凭名字硬调一个没下发的工具，
         // 而「纯离线总结」被硬调一次 web_search 就意味着数据发出去了。
         allowed: tool_whitelist.clone(),

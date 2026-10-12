@@ -854,10 +854,10 @@ const scenarios = {
       const panel = document.querySelector("[class*=compare-panel]");
       const notices = Array.from(document.querySelectorAll(".notice, .toast, .error"))
         .map((el) => el.innerText.trim()).filter(Boolean).join(" | ");
-      return { notices, panel: panel ? panel.innerText.replace(/\\n+/g, " ").slice(0, 400) : "(没有面板)" };
+      return { notices, panel: panel ? panel.innerText.replace(/\\n+/g, " ") : "(没有面板)", panelTail: panel ? panel.innerText.replace(/\\n+/g, " ").slice(-600) : "(没有面板)" };
     `);
     console.log(`  点完开始对比：提示=${afterStart.notices || "(无)"}`);
-    console.log(`  面板内容：${afterStart.panel}`);
+    console.log(`  面板尾部（这才是回答/报错所在的地方）：${afterStart.panelTail}`);
 
     await waitFor(
       `Array.from(document.querySelectorAll('[class*="compare-panel"]')).some((el) =>
@@ -867,7 +867,7 @@ const scenarios = {
     );
     const panel = await evalJs(`
       const el = document.querySelector('[class*="compare-panel"]');
-      return el ? el.innerText.replace(/\\n+/g, " ").slice(0, 300) : "";
+      return el ? el.innerText.replace(/\\n+/g, " ").slice(-600) : "";
     `);
     console.log(`  面板内容：${panel}`);
     assert(panel.includes("mock 回复"), "面板里拿到了 mock 的回答");

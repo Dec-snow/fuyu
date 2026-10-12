@@ -242,7 +242,7 @@ cd src-tauri && cargo clippy --all-targets -- -D warnings
 
 | 检查 | 结果 |
 |---|---|
-| `cargo test` | **357 passed / 0 failed**（另有 1 条**联网**的检查更新测试标了 `--ignored`，显式 `cargo test -- --ignored live_github` 才跑）。不联网的那批含真开 TCP 端口的流式 / 抓取 / 搜索 / **文生图**集成测试、**真读写系统剪贴板**的往返测试、**备份导出→导入**的往返测试、**真 Office 文件**的解析测试、**知识库检索质量**测试、**长期记忆从入库到拼进提示词**的端到端测试，以及技能工具白名单的收窄/拒绝测试 |
+| `cargo test` | **381 passed / 0 failed**（另有 1 条**联网**的检查更新测试标了 `--ignored`，显式 `cargo test -- --ignored live_github` 才跑）。不联网的那批含真开 TCP 端口的流式 / 抓取 / 搜索 / **文生图**集成测试、**真拉子进程**走完整 MCP 协议的集成测试、**真读写系统剪贴板**的往返测试、**备份导出→导入**的往返测试、**真 Office 文件**的解析测试、**知识库检索质量**测试、**长期记忆从入库到拼进提示词**的端到端测试，以及技能工具白名单的收窄/拒绝测试 |
 | `cargo clippy --all-targets -- -D warnings` | 通过，0 warning |
 | `cargo fmt --check` | 通过 |
 | `npm test`（vitest） | **315 passed / 0 failed**（含 16 条直接驱动 store 的竞态/接线测试、10 条一问多答的并发与事件路由测试、16 条技能解析测试、11 条更新提示状态测试，以及组件级渲染断言） |

@@ -25,8 +25,10 @@ const args = Object.fromEntries(
 );
 
 const PORT = Number(args.port ?? 9222);
-const EXE =
-  args.exe ?? resolve("src-tauri/target/release/floatai.exe");
+const EXE = args.exe ?? resolve("src-tauri/target/release/fuyu.exe");
+// 旧名字的产物在改名后会变成"过期残留"：跑它等于静默验证一个旧程序。
+// 见到就明确报错，别让它悄悄通过。
+const STALE = resolve("src-tauri/target/release/floatai.exe");
 const KEEP = Boolean(args.keep);
 const ONLY = args.scenario ? String(args.scenario) : null;
 
@@ -557,6 +559,11 @@ function assert(condition, description) {
 
 async function main() {
   if (!existsSync(EXE)) throw new Error(`找不到可执行文件：${EXE}（先 npm run tauri:build）`);
+  if (existsSync(STALE)) {
+    throw new Error(
+      `发现改名前的旧产物 ${STALE} —— 它已经不更新了，跑它等于验证一个旧程序。请先删掉它。`,
+    );
+  }
 
   console.log(`启动应用：${EXE}`);
   const child = spawn(EXE, [], {

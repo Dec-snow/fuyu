@@ -24,7 +24,7 @@ use url::Url;
 use super::registry::ToolResult;
 
 /// 抓取时使用的 User-Agent（有些站点对没有 UA 的请求直接 403）。
-const USER_AGENT: &str = "Mozilla/5.0 (compatible; FloatAI/0.1; +https://localhost)";
+const USER_AGENT: &str = "Mozilla/5.0 (compatible; fuyu/0.1; +https://localhost)";
 
 /// 抓取限制。
 #[derive(Debug, Clone)]

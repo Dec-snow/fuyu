@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "FloatAI",
+  "productName": "fuyu",
   "version": "0.1.0",
   "identifier": "com.floatai.desktop",
   "build": {
@@ -43,7 +43,7 @@
       "icons/icon.ico"
     ],
     "category": "Productivity",
-    "publisher": "FloatAI",
+    "publisher": "fuyu",
     "shortDescription": "桌面悬浮窗 AI 聊天助手",
     "longDescription": "按 Alt+Space 唤出的悬浮窗 AI 助手：多服务商多模型、流式对话、历史本地留存。",
     "windows": {

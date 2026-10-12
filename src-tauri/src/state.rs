@@ -132,7 +132,7 @@ fn build_http_client(proxy_url: Option<&str>, use_system_proxy: bool) -> reqwest
         .tcp_keepalive(Duration::from_secs(60))
         .pool_max_idle_per_host(8)
         .pool_idle_timeout(Duration::from_secs(90))
-        .user_agent(concat!("FloatAI/", env!("CARGO_PKG_VERSION")));
+        .user_agent(concat!("fuyu/", env!("CARGO_PKG_VERSION")));
 
     if let Some(url) = proxy_url.map(str::trim).filter(|u| !u.is_empty()) {
         match reqwest::Proxy::all(url) {

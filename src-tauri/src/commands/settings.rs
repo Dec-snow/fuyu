@@ -15,7 +15,7 @@ use crate::storage::database::Database;
 pub fn app_info(db: State<'_, Database>, config: State<'_, ConfigStore>) -> AppInfo {
     AppInfo {
         version: env!("CARGO_PKG_VERSION").to_string(),
-        name: "浮语 FloatAI".to_string(),
+        name: "浮语 fuyu".to_string(),
         db_path: db.path().display().to_string(),
         config_path: config.path().display().to_string(),
     }

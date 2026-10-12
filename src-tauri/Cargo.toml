@@ -1,12 +1,12 @@
 [package]
-name = "floatai"
+name = "fuyu"
 version = "0.1.0"
-description = "FloatAI · 桌面悬浮窗 AI 聊天助手（OpenAI 兼容）"
-authors = ["FloatAI"]
+description = "fuyu（浮语）· 桌面悬浮窗 AI 聊天助手（OpenAI 兼容）"
+authors = ["Dec-snow"]
 edition = "2021"
 
 [lib]
-name = "floatai_lib"
+name = "fuyu_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

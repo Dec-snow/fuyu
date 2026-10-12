@@ -177,7 +177,9 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .map_err(|e| format!("无法解析数据目录：{e}"))?;
-            let db = storage::database::Database::open(&data_dir.join("floatai.db"))
+            // ⚠️ 数据库文件名与凭据管理器里的服务名一样，属于**冻结的身份值**：
+// 改名会让用户已有的会话、记忆、知识库"消失"（文件还在，只是找不到）。
+let db = storage::database::Database::open(&data_dir.join("floatai.db"))
                 .map_err(|e| format!("数据库初始化失败：{e}"))?;
             app.manage(db);
 

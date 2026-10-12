@@ -7,6 +7,12 @@
 
 use keyring::Entry;
 
+/// Windows 凭据管理器里的「服务名」。
+///
+/// ⚠️ **这个值不能改。** 用户的 API Key 就是以它为键存在凭据管理器里的：
+/// 改了它，所有人已保存的 Key 会在一夜之间「消失」（其实还在，只是换了地方找不到）。
+/// 所以产品改名成 `fuyu` 之后，这里仍然是 `FloatAI` —— 这是**故意的**，
+/// 不是漏改。下面 `LEGACY_*` 那类命名同理。
 const SERVICE: &str = "FloatAI";
 
 fn entry(provider_id: &str) -> Result<Entry, String> {

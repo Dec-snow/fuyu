@@ -175,6 +175,13 @@ pub struct AppConfig {
     /// `commands/autostart.rs`）。
     #[serde(default)]
     pub autostart: bool,
+    /// 长期记忆。
+    ///
+    /// **默认关闭**：打开之后，每次提问都会把相关的记忆一并发给模型服务商 ——
+    /// 那本质上就是「把本地数据发出去」。这个项目既有的立场是「工具默认关闭、
+    /// 读过本地敏感数据要再确认一次」，所以这里也默认关，由用户明确打开。
+    #[serde(default)]
+    pub memory_enabled: bool,
 }
 
 fn default_window_opacity() -> f32 {
@@ -217,6 +224,7 @@ impl Default for AppConfig {
             message_font_size: default_font_size(),
             roles: Role::presets(),
             autostart: false,
+            memory_enabled: false,
         }
     }
 }

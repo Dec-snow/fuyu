@@ -13,6 +13,9 @@ import type {
   KbDocument,
   KbHit,
   KbStats,
+  Memory,
+  MemoryAddOutcome,
+  MemoryStats,
   MessageHit,
   ProvidersState,
   RolePreset,
@@ -32,6 +35,8 @@ export interface SettingsPatch {
   hideOnBlur?: boolean;
   rememberWindowPosition?: boolean;
   quickActionEnabled?: boolean;
+  /** 长期记忆开关。 */
+  memoryEnabled?: boolean;
   webSearchEndpoint?: string;
   proxyUrl?: string;
   useSystemProxy?: boolean;
@@ -198,6 +203,14 @@ export const api = {
   kbDelete: (id: string) => invoke<void>("kb_delete", { id }),
   kbSearch: (query: string, limit?: number) =>
     invoke<KbHit[]>("kb_search", { query, limit: limit ?? null }),
+
+  // ---- 长期记忆
+  memoryList: () => invoke<Memory[]>("memory_list"),
+  memoryStats: () => invoke<MemoryStats>("memory_stats"),
+  memoryAdd: (text: string) => invoke<MemoryAddOutcome>("memory_add", { text }),
+  memoryDelete: (id: string) => invoke<void>("memory_delete", { id }),
+  /** 试搜：看看某句话会挑中哪几条记忆。 */
+  memoryRelevant: (query: string) => invoke<Memory[]>("memory_relevant", { query }),
 
   // ---- 历史
   listConversations: (limit?: number) =>

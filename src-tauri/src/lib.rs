@@ -14,6 +14,7 @@ mod diagnostics;
 mod documents;
 mod errors;
 mod kb;
+mod memory;
 mod models;
 mod state;
 mod storage;
@@ -77,6 +78,12 @@ pub fn run() {
             commands::autostart::started_minimized,
             // ---- 用量与费用
             commands::usage::usage_report,
+            // ---- 长期记忆
+            commands::memory::memory_list,
+            commands::memory::memory_stats,
+            commands::memory::memory_add,
+            commands::memory::memory_delete,
+            commands::memory::memory_relevant,
             // ---- 本地知识库
             commands::kb::kb_list,
             commands::kb::kb_stats,

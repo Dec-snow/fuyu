@@ -9,6 +9,9 @@ import type { KbDocument, KbHit, KbStats } from "../types";
 import {
   describeDocument,
   describeHit,
+  describeMemory,
+  describeMemorySource,
+  describeMemoryStats,
   describeStats,
   formatChars,
   kbFileKind,
@@ -96,6 +99,30 @@ describe("previewText", () => {
   it("空文本不炸", () => {
     expect(previewText("")).toBe("");
     expect(previewText("   \n  ")).toBe("");
+  });
+});
+
+describe("记忆的显示", () => {
+  it("区分「手动添加」与「模型记录」", () => {
+    expect(describeMemorySource("user")).toBe("手动添加");
+    expect(describeMemorySource("tool")).toBe("模型记录");
+  });
+
+  it("把「用过 0 次」也显示出来", () => {
+    // 用户据此能发现「记了一堆从来没被用上的东西」
+    expect(describeMemory({ source: "tool", usedCount: 0 })).toContain("还没被用过");
+    expect(describeMemory({ source: "tool", usedCount: 3 })).toContain("用过 3 次");
+  });
+
+  it("空记忆库给一句人话", () => {
+    expect(describeMemoryStats(null)).toContain("还没有记忆");
+    expect(describeMemoryStats({ total: 0, limit: 500, used: 0 })).toContain("还没有记忆");
+  });
+
+  it("有记忆时报出「总量 / 上限」与用过几条", () => {
+    const line = describeMemoryStats({ total: 12, limit: 500, used: 5 });
+    expect(line).toContain("12 / 500");
+    expect(line).toContain("5 条被用过");
   });
 });
 

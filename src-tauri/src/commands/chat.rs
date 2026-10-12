@@ -76,13 +76,47 @@ pub async fn chat_send(
     validate_request(&request)?;
 
     // 1) 解析服务商与模型。
-    let (provider, effective_system_prompt) = config.read(|cfg| {
+    let (provider, mut effective_system_prompt) = config.read(|cfg| {
         let provider = cfg.provider(&request.provider_id).cloned();
         let prompt = resolve_system_prompt(cfg, &request);
         (provider, prompt)
     });
     let provider = provider
         .ok_or_else(|| AppError::invalid(format!("找不到服务商：{}", request.provider_id)))?;
+
+    // 长期记忆：把与这次提问相关的几条记忆拼进系统提示词。
+    //
+    // 三条考虑：
+    // - **只在本条请求里做一次**（不是每一轮工具循环都做）：多轮工具调用复用同一份
+    //   系统提示词，重复注入只会让它们互相矛盾；
+    // - **默认关闭**：这等于把本地存下来的用户信息发给服务商，与工具开关同一个立场
+    //   （默认关、用户自己开）；
+    // - **检索失败不影响聊天**：记忆是锦上添花，出问题记一条诊断日志就够，
+    //   不能因为查询记忆失败而让整条消息发不出去。
+    if config.read(|cfg| cfg.memory_enabled) {
+        let last_user = request
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "user")
+            .map(|m| m.content.as_str());
+        if let Some(query) = last_user {
+            match db.memory_relevant(query, crate::memory::INJECT_LIMIT) {
+                Ok(memories) if !memories.is_empty() => {
+                    let block = crate::memory::prompt_block(&memories);
+                    effective_system_prompt = merge_memory_block(effective_system_prompt, &block);
+                    let ids: Vec<String> = memories.iter().map(|m| m.id.clone()).collect();
+                    if let Err(e) = db.memory_mark_used(&ids) {
+                        state
+                            .logs
+                            .record("memory", format!("记录记忆使用失败：{e}"));
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => state.logs.record("memory", format!("检索记忆失败：{e}")),
+            }
+        }
+    }
 
     let model = if request.model_key.trim().is_empty() {
         provider
@@ -329,10 +363,12 @@ async fn run_stream(
     // 知识库为空时不下发检索工具：模型看不到就不会去调一个必然空手而归的工具。
     // 这里每次请求都查一次 COUNT —— 单表计数，代价可以忽略。
     let kb_available = db.kb_document_count().unwrap_or(0) > 0;
+    let memory_enabled = config.read(|c| c.memory_enabled);
     let tools = request.enable_tools.then(|| {
         registry::to_openai_tools(registry::ToolAvailability {
             web_search: search_endpoint.is_some(),
             knowledge_base: kb_available,
+            memory: memory_enabled,
         })
     });
     let tool_ctx = registry::ToolContext {
@@ -341,6 +377,7 @@ async fn run_stream(
         // 库里没文档就不给句柄：与「不下发工具」保持一致，
         // 免得出现「工具列表里没有、但直接调用却能跑」的不一致状态。
         knowledge_base: kb_available.then(|| db.clone()),
+        memory: memory_enabled.then(|| db.clone()),
     };
 
     // 数据流防泄漏：任何「读本地敏感数据」的工具成功执行过之后置位；
@@ -1211,6 +1248,25 @@ fn attach_images(db: &Database, messages: &mut [ChatMessage]) {
     }
 }
 
+/// 把记忆块接到系统提示词后面。
+///
+/// 单独抽出来是为了能测：注入这一步在 `chat_send` 里、又依赖真库与真服务商，
+/// 端到端跑不起来；而「怎么拼」这条规则本身是纯的，值得单测盯着。
+///
+/// 两条规则：
+/// - 本来没有系统提示词时，记忆块**就是**系统提示词（不能拼出一个以空行
+///   开头的提示词）；
+/// - 空块不改变原样（否则每次都会多出一个空行，还会让「有记忆」的判断失真）。
+fn merge_memory_block(base: Option<String>, block: &str) -> Option<String> {
+    if block.trim().is_empty() {
+        return base;
+    }
+    Some(match base {
+        Some(base) if !base.trim().is_empty() => format!("{base}\n\n{block}"),
+        _ => block.to_string(),
+    })
+}
+
 /// 系统提示词优先级：请求 > 全局默认。
 fn resolve_system_prompt(cfg: &AppConfig, request: &ChatSendRequest) -> Option<String> {
     if let Some(prompt) = request
@@ -1239,12 +1295,90 @@ fn is_keyless_provider(provider: &ProviderConfig) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn memory_block_is_appended_to_the_system_prompt() {
+        let merged = merge_memory_block(Some("你是浮语。".into()), "关于用户：喜欢 Rust")
+            .expect("有内容就该合出来");
+        assert!(merged.starts_with("你是浮语。"), "{merged}");
+        assert!(merged.ends_with("关于用户：喜欢 Rust"), "{merged}");
+        // 中间要有空行，不然会跟上一条规则粘在一起
+        assert!(merged.contains("。\n\n"), "{merged}");
+    }
+
+    #[test]
+    fn memory_block_becomes_the_prompt_when_there_is_none() {
+        // 不能拼出一个以空行开头的系统提示词
+        assert_eq!(
+            merge_memory_block(None, "关于用户：喜欢 Rust"),
+            Some("关于用户：喜欢 Rust".to_string())
+        );
+        // 空白提示词等同于没有
+        assert_eq!(
+            merge_memory_block(Some("   ".into()), "关于用户：喜欢 Rust"),
+            Some("关于用户：喜欢 Rust".to_string())
+        );
+    }
+
+    #[test]
+    fn an_empty_memory_block_changes_nothing() {
+        assert_eq!(merge_memory_block(None, ""), None);
+        assert_eq!(
+            merge_memory_block(Some("你是浮语。".into()), "  "),
+            Some("你是浮语。".to_string())
+        );
+    }
+
     fn user(content: &str) -> ChatMessage {
         ChatMessage {
             role: "user".to_string(),
             content: content.to_string(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn memories_are_injected_end_to_end_without_the_unrelated_ones() {
+        // 真库 + 真检索 + 真拼接：验证「开了长期记忆之后，系统提示词里到底带上
+        // 了什么」这条链路。它不碰网络（注入发生在发请求之前），所以离线也能跑完。
+        let dir =
+            std::env::temp_dir().join(format!("floatai-meminject-{}", crate::storage::new_id("")));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = crate::storage::database::Database::open(&dir.join("m.db")).unwrap();
+        db.memory_add("用户偏好 Rust 而不是 Python", "tool")
+            .unwrap();
+        db.memory_add("用户的猫叫团子", "tool").unwrap();
+
+        // 用户这次的提问决定挑哪几条记忆
+        let query = "我想用 Rust 重写这个模块";
+        let memories = db
+            .memory_relevant(query, crate::memory::INJECT_LIMIT)
+            .unwrap();
+        assert_eq!(
+            memories.len(),
+            1,
+            "只该挑中与 Rust 相关的那条：{memories:?}"
+        );
+
+        let base = Some("你是浮语。".to_string());
+        let prompt =
+            merge_memory_block(base, &crate::memory::prompt_block(&memories)).expect("应当合出来");
+        assert!(prompt.starts_with("你是浮语。"), "{prompt}");
+        assert!(prompt.contains("用户偏好 Rust"), "{prompt}");
+        assert!(!prompt.contains("团子"), "不相关的记忆不该被注入：{prompt}");
+
+        // 注入过的记忆要计一次数（界面据此显示「用过 N 次」）
+        let ids: Vec<String> = memories.iter().map(|m| m.id.clone()).collect();
+        db.memory_mark_used(&ids).unwrap();
+        let used = db
+            .memory_list()
+            .unwrap()
+            .into_iter()
+            .find(|m| m.text.contains("Rust"))
+            .unwrap();
+        assert_eq!(used.used_count, 1);
+        assert!(used.last_used_at.is_some());
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     fn request(messages: Vec<ChatMessage>) -> ChatSendRequest {

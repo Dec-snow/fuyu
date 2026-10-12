@@ -90,6 +90,12 @@ export interface AppConfig {
   roles: RolePreset[];
   /** 用户的「开机自启」选择；系统里的真实状态可能被任务管理器改掉。 */
   autostart: boolean;
+  /**
+   * 长期记忆开关。
+   *
+   * 打开后每次提问都会把相关的记忆一并发给模型服务商，所以默认关闭。
+   */
+  memoryEnabled: boolean;
 }
 
 export interface Conversation {
@@ -190,6 +196,32 @@ export interface KbStats {
   chunks: number;
   terms: number;
   chars: number;
+}
+
+/** 一条长期记忆。 */
+export interface Memory {
+  id: string;
+  text: string;
+  /** `tool`（模型自己记的）/ `user`（手动添加）。 */
+  source: string;
+  createdAt: number;
+  lastUsedAt: number | null;
+  /** 被注入过几次。 */
+  usedCount: number;
+}
+
+export interface MemoryStats {
+  total: number;
+  limit: number;
+  /** 被用过至少一次的有几条。 */
+  used: number;
+}
+
+/** 收录一条记忆的结果。 */
+export interface MemoryAddOutcome {
+  memory: Memory;
+  /** 是不是合并进了已有的一条（而不是新增）。 */
+  merged: boolean;
 }
 
 export interface StoredMessage {

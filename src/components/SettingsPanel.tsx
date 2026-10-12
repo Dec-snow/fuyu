@@ -14,6 +14,8 @@ import { formatDiagnostics, hasProblems } from "../lib/diagnostics";
 import {
   describeDocument,
   describeHit,
+  describeMemory,
+  describeMemoryStats,
   describeStats,
   kbFileKind,
   previewText,
@@ -33,7 +35,16 @@ import { useChat } from "../stores/chat";
 import { applyAppearance, previewAppearance, useConfig } from "../stores/config";
 import { useProviders } from "../stores/providers";
 import { useUi } from "../stores/ui";
-import type { Diagnostics, KbDocument, KbHit, KbStats, RolePreset, UsageReport } from "../types";
+import type {
+  Diagnostics,
+  KbDocument,
+  KbHit,
+  KbStats,
+  Memory,
+  MemoryStats,
+  RolePreset,
+  UsageReport,
+} from "../types";
 import { CopyButton } from "./CopyButton";
 
 type Tab = "models" | "appearance" | "general" | "kb" | "data" | "about";
@@ -1447,6 +1458,170 @@ function KnowledgeTab() {
           </div>
         )}
       </div>
+
+      <MemorySection />
+    </div>
+  );
+}
+
+/**
+ * 长期记忆。
+ *
+ * 开关放在知识库页而不是「通用」页：记忆与知识库是同一件事的两面
+ * （都是「回答时能用上的本地资料」），放在一起用户才容易理解
+ * 「打开它意味着什么」。
+ */
+function MemorySection() {
+  const config = useConfig((s) => s.config);
+  const patch = useConfig((s) => s.patch);
+  const pushNotice = useUi((s) => s.pushNotice);
+  const [list, setList] = useState<Memory[]>([]);
+  const [stats, setStats] = useState<MemoryStats | null>(null);
+  const [draft, setDraft] = useState("");
+  const [probe, setProbe] = useState("");
+  const [hits, setHits] = useState<Memory[] | null>(null);
+
+  const refresh = async () => {
+    try {
+      const [memories, overview] = await Promise.all([
+        api.memoryList(),
+        api.memoryStats(),
+      ]);
+      setList(memories);
+      setStats(overview);
+    } catch (e) {
+      pushNotice(`读取记忆失败：${e}`);
+    }
+  };
+
+  useEffect(() => {
+    void refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 配置还没读回来时先不画开关：显示一个「关着」的复选框会让人以为
+  // 自己没打开过（其实只是还没读到）。
+  if (config === null) {
+    return <div className="field"><span>长期记忆</span></div>;
+  }
+
+  return (
+    <div className="field">
+      <span>长期记忆</span>
+
+      <label className="field checkbox">
+        <input
+          type="checkbox"
+          checked={config.memoryEnabled}
+          onChange={(e) => void patch({ memoryEnabled: e.target.checked })}
+        />
+        <span>让模型记住关于我的长期信息</span>
+      </label>
+      <div className="settings-hint">
+        打开后：模型在对话里遇到长期有用的事实时会自己记下来；你提问时，
+        相关的几条会随请求**一并发给模型服务商**（所以默认关闭）。存在本机，
+        可以随时在这里查看和删除。
+      </div>
+
+      <div className="settings-hint">{describeMemoryStats(stats)}</div>
+
+      <div className="danger-row">
+        <input
+          className="kb-title"
+          placeholder="手动加一条，例如「我偏好简洁的回答」"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && draft.trim()) {
+              void api
+                .memoryAdd(draft)
+                .then(async (outcome) => {
+                  setDraft("");
+                  if (outcome.merged) pushNotice("和已有的一条几乎一样，已合并更新");
+                  await refresh();
+                })
+                .catch((err) => pushNotice(`添加失败：${err}`));
+            }
+          }}
+        />
+        <button
+          className="ghost-button"
+          disabled={draft.trim().length === 0}
+          onClick={() =>
+            void api
+              .memoryAdd(draft)
+              .then(async (outcome) => {
+                setDraft("");
+                if (outcome.merged) pushNotice("和已有的一条几乎一样，已合并更新");
+                await refresh();
+              })
+              .catch((err) => pushNotice(`添加失败：${err}`))
+          }
+        >
+          记下来
+        </button>
+      </div>
+
+      {list.length === 0 ? null : (
+        <div className="kb-docs">
+          {list.map((memory) => (
+            <div className="kb-doc" key={memory.id}>
+              <span className="kb-doc-title" title={memory.text}>
+                {memory.text}
+              </span>
+              <span className="kb-doc-meta">{describeMemory(memory)}</span>
+              <button
+                className="role-delete"
+                title="删掉这条记忆"
+                onClick={() =>
+                  void api
+                    .memoryDelete(memory.id)
+                    .then(refresh)
+                    .catch((e) => pushNotice(`删除失败：${e}`))
+                }
+              >
+                删除
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="danger-row">
+        <input
+          className="kb-title"
+          placeholder="试试这句话会挑中哪几条记忆"
+          value={probe}
+          onChange={(e) => setProbe(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && probe.trim()) {
+              void api
+                .memoryRelevant(probe)
+                .then(setHits)
+                .catch((err) => pushNotice(`试搜失败：${err}`));
+            }
+          }}
+        />
+        <button
+          className="ghost-button"
+          disabled={probe.trim().length === 0}
+          onClick={() =>
+            void api
+              .memoryRelevant(probe)
+              .then(setHits)
+              .catch((err) => pushNotice(`试搜失败：${err}`))
+          }
+        >
+          试试
+        </button>
+      </div>
+      {hits !== null ? (
+        <div className="settings-hint">
+          {hits.length === 0
+            ? "这句话不会带上任何记忆。"
+            : `会带上：${hits.map((m) => m.text).join("；")}`}
+        </div>
+      ) : null}
     </div>
   );
 }

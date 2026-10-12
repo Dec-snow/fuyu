@@ -73,6 +73,14 @@ fn push_latin(current: &mut String, out: &mut Vec<String>) {
 
 /// 把文本切成检索用的 token（保序、允许重复 —— 调用方要用重复次数算 tf）。
 pub fn tokenize(text: &str) -> Vec<String> {
+    tokenize_inner(text, true)
+}
+
+/// 扫描文本产出 token。
+///
+/// `include_unigrams` 为假时，长度 ≥2 的汉字串**只产双字**。
+/// 索引两种都存（[`tokenize`]），查询只用双字（[`query_terms`]）。
+fn tokenize_inner(text: &str, include_unigrams: bool) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let chars: Vec<char> = text.chars().collect();
     let mut i = 0;
@@ -96,9 +104,12 @@ pub fn tokenize(text: &str) -> Vec<String> {
                     i += 1;
                 }
                 let run = &chars[start..i];
-                // 单字：让「书」这种一字查询也能命中
-                for ch in run {
-                    out.push(ch.to_string());
+                // 单字：让「书」这种一字查询也能命中。
+                // 长度 ≥2 且不需要单字时跳过 —— 长串里的单字几乎全是噪音。
+                if include_unigrams || run.len() < 2 {
+                    for ch in run {
+                        out.push(ch.to_string());
+                    }
                 }
                 // 双字：主要区分度来自这里
                 for pair in run.windows(2) {
@@ -113,15 +124,20 @@ pub fn tokenize(text: &str) -> Vec<String> {
     out
 }
 
-/// 查询用的 token：**去重并保序**。
+/// 查询用的 token：**去重并保序**，且汉字长串只用双字。
 ///
-/// 为什么与 `tokenize` 分开：索引要 tf（重复次数有意义），而查询里同一个词
-/// 出现两次不代表「更重要两倍」—— 按查询词频加权会让重复敲一个词变成一种
-/// 粗糙的加权手段，结果不可预期。这里直接去重。
+/// 两条规则各有原因：
+///
+/// - **去重**：查询里同一个词出现两次不代表「更重要两倍」。按查询词频加权会让
+///   「重复敲一个词」变成一种粗糙的加权手段，结果不可预期。
+/// - **长串只用双字**：索引里单字与双字都存，但查询时若把单字也带上，就会出现
+///   「搜『量子力学』命中『用户的猫叫团子』」这种噪音 —— 两边都含「子」。
+///   长度 ≥2 的汉字串用双字已经足够精确；而**单字查询（如「蛋」）仍然走单字**，
+///   所以「一个字也要能搜到」这条并没有丢。
 pub fn query_terms(text: &str) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
-    for token in tokenize(text) {
+    for token in tokenize_inner(text, false) {
         if seen.insert(token.clone()) {
             out.push(token);
         }
@@ -229,17 +245,32 @@ mod tests {
 
     #[test]
     fn query_terms_are_deduplicated_but_keep_order() {
-        // 注意：中间的空格会把汉字串切断，所以**不会**产生跨空格的 bigram「语助」。
-        // 这是有意的 —— 空格在中文里通常是真实的分隔（用户不会平白敲一个空格）。
+        // 查询只用双字：**不会**出现「浮」「语」这些单字（见 query_terms 的说明）
         assert_eq!(
             query_terms("浮语 浮语 助手"),
-            vec!["浮", "语", "浮语", "助", "手", "助手"]
+            vec!["浮语", "助手"],
+            "长串只取双字且去重"
         );
-        // 重复出现不应当让某个词在结果里出现两次
         let terms = query_terms("rust rust rust");
         assert_eq!(terms, vec!["rust".to_string()]);
     }
 
+    #[test]
+    fn a_single_char_query_still_uses_the_unigram() {
+        // 「一个字也要能搜到」这条不能因为「查询只用双字」而丢掉
+        assert_eq!(query_terms("蛋"), vec!["蛋".to_string()]);
+    }
+
+    #[test]
+    fn long_chinese_queries_do_not_include_noisy_unigrams() {
+        // 真实踩到的坑：搜「量子力学」时带上单字「子」，会命中「用户的猫叫团子」
+        let terms = query_terms("量子力学");
+        assert_eq!(terms, vec!["量子", "子力", "力学"]);
+        assert!(
+            !terms.contains(&"子".to_string()),
+            "不该带上单字：{terms:?}"
+        );
+    }
     #[test]
     fn a_space_breaks_chinese_bigrams() {
         // 连在一起的「浮语助手」会产生 语助，而「浮语 助手」不会 ——

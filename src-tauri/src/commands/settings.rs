@@ -58,9 +58,11 @@ pub struct SettingsPatch {
     pub window_opacity: Option<f32>,
     /// 正文字号 px（会被收进 `MIN_FONT_SIZE ..= MAX_FONT_SIZE`）。
     pub message_font_size: Option<f32>,
-    /// 角色预设。整表覆写 —— 与 `always_allowed_tools` 同一个思路：
+    /// 角色预设。整表覆写 —— 与 lways_allowed_tools 同一个思路：
     /// 界面上的操作是「改一个 / 删一个」，整表覆写比算差集简单也更难出错。
     pub roles: Option<Vec<Role>>,
+    /// 长期记忆开关（打开后会把相关记忆随请求发给服务商）。
+    pub memory_enabled: Option<bool>,
 }
 
 /// 角色数量上限。
@@ -241,6 +243,9 @@ pub async fn update_settings(
         }
         if let Some(roles) = patch.roles {
             cfg.roles = sanitize_roles(roles)?;
+        }
+        if let Some(enabled) = patch.memory_enabled {
+            cfg.memory_enabled = enabled;
         }
         // 改完代理立刻重建 HTTP 客户端，否则要重启才生效。
         Ok(cfg.clone())

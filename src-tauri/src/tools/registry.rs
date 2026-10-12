@@ -75,6 +75,8 @@ pub struct ToolAvailability {
     pub web_search: bool,
     /// 知识库里有文档才下发 `search_knowledge_base`。
     pub knowledge_base: bool,
+    /// 打开了长期记忆才下发 `remember`。
+    pub memory: bool,
 }
 
 impl ToolAvailability {
@@ -83,6 +85,7 @@ impl ToolAvailability {
         Self {
             web_search: true,
             knowledge_base: true,
+            memory: true,
         }
     }
 }
@@ -212,6 +215,30 @@ pub fn tool_definitions(availability: ToolAvailability) -> Vec<ToolDefinition> {
         });
     }
 
+    if availability.memory {
+        tools.push(ToolDefinition {
+            name: "remember",
+            description: "把关于用户的、**以后还用得上**的事实记下来（长期偏好、正在做的项目、\
+                         固定的工作习惯）。只记长期有效的信息；一次性的事情、能从这次对话里\
+                         直接看出来的、以及任何敏感信息都不要记。",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "一句话说清要记住的事实，例如「用户偏好 Rust 而不是 Python」"
+                    }
+                },
+                "required": ["text"],
+                "additionalProperties": false
+            }),
+            // 只是写本地的一张表：不外发、不碰系统资源。
+            // 用户能在「设置 → 知识库」里看到并逐条删除，所以不必每次弹审批。
+            sensitive: false,
+            exfiltrates: false,
+        });
+    }
+
     tools
 }
 
@@ -261,6 +288,8 @@ pub struct ToolContext {
     /// `Database` 内部是 `Arc<Mutex<Connection>>`，克隆很便宜；
     /// 传进来的目的是让检索工具能直接查库，而不是再包一层服务。
     pub knowledge_base: Option<crate::storage::database::Database>,
+    /// 长期记忆的句柄（没打开长期记忆时为 `None`）。
+    pub memory: Option<crate::storage::database::Database>,
 }
 
 /// 执行一个工具。`args` 是模型给的参数（已经过 JSON 解析）。
@@ -279,6 +308,7 @@ pub async fn execute(name: &str, args: &Value, ctx: &ToolContext) -> ToolResult 
             super::web::run_web_search(ctx.search_endpoint.as_deref(), args, proxy).await
         }
         "search_knowledge_base" => search_knowledge_base(args, ctx.knowledge_base.as_ref()),
+        "remember" => remember(args, ctx.memory.as_ref()),
         other => ToolResult::error(format!("未知工具：{other}")),
     }
 }
@@ -336,6 +366,28 @@ fn search_knowledge_base(
             ToolResult::ok(out.trim_end())
         }
         Err(e) => ToolResult::error(format!("知识库检索失败：{e}")),
+    }
+}
+
+/// 记住一条关于用户的事实。
+///
+/// 返回里明确告诉模型「去重时是更新了已有的一条」：它会据此避免
+/// 换个说法反复记同一件事（虽然服务端也会去重，但让它知道更省 token）。
+fn remember(args: &Value, db: Option<&crate::storage::database::Database>) -> ToolResult {
+    let Some(db) = db else {
+        return ToolResult::error("长期记忆没有打开（可在「设置 → 知识库」里开启）");
+    };
+    let text = match args.get("text").and_then(Value::as_str) {
+        Some(t) if !t.trim().is_empty() => t,
+        _ => return ToolResult::error("缺少 text 参数"),
+    };
+
+    match db.memory_add(text, "tool") {
+        Ok(outcome) if outcome.merged => {
+            ToolResult::ok(format!("已更新已有的一条记忆：{}", outcome.memory.text))
+        }
+        Ok(outcome) => ToolResult::ok(format!("已记住：{}", outcome.memory.text)),
+        Err(e) => ToolResult::error(format!("记不下来：{e}")),
     }
 }
 
@@ -505,6 +557,7 @@ mod tests {
             search_endpoint: None,
             proxy_url: None,
             knowledge_base: None,
+            memory: None,
         }
     }
 
@@ -604,6 +657,7 @@ mod tests {
             search_endpoint: None,
             proxy_url: None,
             knowledge_base: Some(db),
+            memory: None,
         };
         let result = execute(
             "search_knowledge_base",
@@ -629,6 +683,66 @@ mod tests {
             "不该把内部打分发给模型：{}",
             result.content
         );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn remember_tool_is_hidden_until_long_term_memory_is_on() {
+        // 与 web_search / 知识库同一个原则：没打开就不下发
+        let off = ToolAvailability {
+            web_search: false,
+            knowledge_base: false,
+            memory: false,
+        };
+        assert!(!names(off).contains(&"remember"));
+        assert!(names(ToolAvailability::all()).contains(&"remember"));
+    }
+
+    #[tokio::test]
+    async fn remember_tool_without_a_handle_explains_itself() {
+        let result = execute("remember", &json!({ "text": "x" }), &ctx()).await;
+        assert!(result.is_error);
+        assert!(result.content.contains("长期记忆"), "{}", result.content);
+    }
+
+    #[tokio::test]
+    async fn remember_tool_writes_and_reports_merges() {
+        let dir =
+            std::env::temp_dir().join(format!("floatai-memtool-{}", crate::storage::new_id("")));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = crate::storage::database::Database::open(&dir.join("mem.db")).unwrap();
+        let mem_ctx = ToolContext {
+            search_endpoint: None,
+            proxy_url: None,
+            knowledge_base: None,
+            memory: Some(db.clone()),
+        };
+
+        let first = execute(
+            "remember",
+            &json!({ "text": "用户偏好 Rust 而不是 Python" }),
+            &mem_ctx,
+        )
+        .await;
+        assert!(!first.is_error, "{}", first.content);
+        assert!(first.content.contains("已记住"), "{}", first.content);
+        assert_eq!(db.memory_count().unwrap(), 1);
+
+        // 换个说法再来一次：应当报「已更新」，而且**不新增**
+        let again = execute(
+            "remember",
+            &json!({ "text": "用户偏好用 Rust 而不是 Python" }),
+            &mem_ctx,
+        )
+        .await;
+        assert!(again.content.contains("已更新"), "{}", again.content);
+        assert_eq!(db.memory_count().unwrap(), 1, "换个说法不该攒成两条");
+
+        // 缺参数要给人话
+        let missing = execute("remember", &json!({}), &mem_ctx).await;
+        assert!(missing.is_error);
+        assert!(missing.content.contains("text"), "{}", missing.content);
 
         std::fs::remove_dir_all(&dir).ok();
     }

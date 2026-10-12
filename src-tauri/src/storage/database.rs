@@ -16,6 +16,7 @@ use rusqlite::{Connection, OptionalExtension};
 
 use crate::errors::{AppError, AppResult};
 use crate::kb::{self, KbDocument, KbHit, KbStats};
+use crate::memory::{Memory, MemoryAddOutcome};
 use crate::models::chat::{Conversation, MessageHit, MessageStatus, MessageText, StoredMessage};
 use crate::storage::backup::{Backup, BackupConversation, BackupMessage, ImportReport};
 use crate::storage::{new_id, now_ms};
@@ -224,6 +225,26 @@ const MIGRATIONS: &[Step] = &[
             term TEXT PRIMARY KEY,
             df   INTEGER NOT NULL
         ) WITHOUT ROWID;",
+    ),
+    // v15 —— 长期记忆。
+    //
+    // 与知识库的分工：知识库是「用户主动导入的资料」，记忆是「从对话里沉淀下来的
+    // 关于用户的事实」。
+    //
+    // **刻意不建倒排索引**：一条记忆就是一句话，总量在几百条量级，检索时直接
+    // 遍历 + 现算 BM25 的代价可以忽略；而维护 df 增减、删除重算那些复杂度只有
+    // 在「上万段文本」时才划算（知识库正是那种规模）。
+    // 索引的价值随语料规模增长 —— 在小语料上它只是债。
+    Step::Sql(
+        "CREATE TABLE IF NOT EXISTS memories (
+            id           TEXT PRIMARY KEY,
+            text         TEXT NOT NULL,
+            source       TEXT NOT NULL DEFAULT 'tool',
+            created_at   INTEGER NOT NULL,
+            updated_at   INTEGER NOT NULL,
+            last_used_at INTEGER,
+            used_count   INTEGER NOT NULL DEFAULT 0
+        );",
     ),
 ];
 
@@ -810,7 +831,160 @@ impl Database {
         })
     }
 
+    // ------------------------------------------------------------------
+    // 长期记忆
+    // ------------------------------------------------------------------
+
+    /// 读全部记忆（按加入时间倒序）。
+    pub fn memory_list(&self) -> AppResult<Vec<Memory>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, text, source, created_at, last_used_at, used_count
+                   FROM memories
+                  ORDER BY created_at DESC, rowid DESC",
+            )?;
+            let rows = stmt.query_map([], map_memory)?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            Ok(out)
+        })
+    }
+
+    pub fn memory_count(&self) -> AppResult<i64> {
+        self.with_conn(
+            |conn| Ok(conn.query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))?),
+        )
+    }
+
+    fn memory_tokens(&self) -> AppResult<Vec<(String, Vec<String>)>> {
+        Ok(self
+            .memory_list()?
+            .into_iter()
+            .map(|m| {
+                let tokens = crate::kb::tokenize(&m.text);
+                (m.id, tokens)
+            })
+            .collect())
+    }
+
+    /// 收录一条记忆；与已有记忆几乎一样时**更新那一条**而不是新增。
+    ///
+    /// 没有去重这一步，记忆库会被「用户喜欢 Rust」的二十种说法填满，
+    /// 而每次能注入的只有几条 —— 等于把真正有用的挤出去。
+    pub fn memory_add(&self, text: &str, source: &str) -> AppResult<MemoryAddOutcome> {
+        let text = crate::memory::validate(text)?;
+        let tokens = crate::kb::tokenize(&text);
+        let now = now_ms();
+
+        let existing = self.memory_tokens()?;
+        if let Some(id) = crate::memory::find_near_duplicate(&existing, &tokens) {
+            let id = id.to_string();
+            self.with_conn(|conn| {
+                conn.execute(
+                    "UPDATE memories SET text = ?2, source = ?3, updated_at = ?4 WHERE id = ?1",
+                    rusqlite::params![id, text, source, now],
+                )?;
+                Ok(())
+            })?;
+            let memory = self
+                .memory_list()?
+                .into_iter()
+                .find(|m| m.id == id)
+                .ok_or_else(|| AppError::internal("刚更新的记忆读不回来"))?;
+            return Ok(MemoryAddOutcome {
+                memory,
+                merged: true,
+            });
+        }
+
+        let count = self.memory_count()?;
+        if count >= crate::memory::MAX_MEMORIES {
+            return Err(AppError::invalid(format!(
+                "记忆条数已达上限（{} 条）。可以到「设置 → 知识库」里删掉一些不再适用的。",
+                crate::memory::MAX_MEMORIES
+            )));
+        }
+
+        let memory = Memory {
+            id: new_id("mem_"),
+            text: text.clone(),
+            source: source.to_string(),
+            created_at: now,
+            last_used_at: None,
+            used_count: 0,
+        };
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO memories (id, text, source, created_at, updated_at, last_used_at, used_count)
+                 VALUES (?1, ?2, ?3, ?4, ?4, NULL, 0)",
+                rusqlite::params![memory.id, memory.text, memory.source, now],
+            )?;
+            Ok(())
+        })?;
+        Ok(MemoryAddOutcome {
+            memory,
+            merged: false,
+        })
+    }
+
+    pub fn memory_delete(&self, id: &str) -> AppResult<()> {
+        self.with_conn(|conn| {
+            conn.execute("DELETE FROM memories WHERE id = ?1", [id])?;
+            Ok(())
+        })
+    }
+
+    /// 记下一次注入（界面显示「用过 N 次」，用户据此判断这条记有没有用）。
+    pub fn memory_mark_used(&self, ids: &[String]) -> AppResult<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let now = now_ms();
+        self.with_conn(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            for id in ids {
+                tx.execute(
+                    "UPDATE memories SET used_count = used_count + 1, last_used_at = ?2 WHERE id = ?1",
+                    rusqlite::params![id, now],
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
+    /// 挑出与查询最相关的若干条记忆。
+    ///
+    /// 全部读回来在内存里算 —— 见 v15 迁移里的说明（几百条一句话的记忆，
+    /// 建索引的复杂度换不来什么）。
+    pub fn memory_relevant(&self, query: &str, limit: usize) -> AppResult<Vec<Memory>> {
+        let terms = crate::kb::query_terms(query);
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+        let all = self.memory_list()?;
+        let corpus: Vec<(String, Vec<String>)> = all
+            .iter()
+            .map(|m| (m.id.clone(), crate::kb::tokenize(&m.text)))
+            .collect();
+
+        let ranked = crate::memory::rank_relevant(&corpus, &terms, limit);
+        if ranked.is_empty() {
+            return Ok(Vec::new());
+        }
+        // 按打分顺序回填（`all` 是按时间排的，不能直接用）
+        let mut by_id: HashMap<String, Memory> =
+            all.into_iter().map(|m| (m.id.clone(), m)).collect();
+        Ok(ranked
+            .into_iter()
+            .filter_map(|(id, _)| by_id.remove(&id))
+            .collect())
+    }
+
     /// 按「天 + 服务商 + 模型」聚合 token 用量，供费用估算与趋势图使用。
+    ///
     /// 只统计**真的报过 usage 的助手消息**（两个 token 字段加起来大于 0）：
     /// - 用户消息没有 token，混进来会造出一堆「模型名为空」的行，
     ///   然后被费用估算当成「认不出来的模型」列出来 —— 那是纯噪音；
@@ -1370,6 +1544,17 @@ fn escape_like(input: &str) -> String {
     out
 }
 
+fn map_memory(row: &rusqlite::Row<'_>) -> rusqlite::Result<Memory> {
+    Ok(Memory {
+        id: row.get(0)?,
+        text: row.get(1)?,
+        source: row.get(2)?,
+        created_at: row.get(3)?,
+        last_used_at: row.get(4)?,
+        used_count: row.get(5)?,
+    })
+}
+
 fn map_conversation(row: &rusqlite::Row<'_>) -> rusqlite::Result<Conversation> {
     Ok(Conversation {
         id: row.get(0)?,
@@ -1871,6 +2056,154 @@ mod tests {
         assert!(db.kb_search("随便什么", 5).unwrap().is_empty());
         // 空查询也不该报错
         assert!(db.kb_search("   ", 5).unwrap().is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn memory_add_list_and_count() {
+        let (db, dir) = temp_db();
+        assert_eq!(db.memory_count().unwrap(), 0);
+
+        let first = db
+            .memory_add("用户偏好 Rust 而不是 Python", "tool")
+            .unwrap();
+        assert!(!first.merged);
+        assert_eq!(first.memory.source, "tool");
+        assert_eq!(first.memory.used_count, 0);
+        assert!(first.memory.last_used_at.is_none());
+
+        db.memory_add("用户的猫叫团子", "user").unwrap();
+        assert_eq!(db.memory_count().unwrap(), 2);
+
+        let list = db.memory_list().unwrap();
+        assert_eq!(list.len(), 2);
+        // 新的在前
+        assert_eq!(list[0].text, "用户的猫叫团子");
+        assert_eq!(list[0].source, "user");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_reworded_memory_merges_instead_of_piling_up() {
+        // 这是记忆库最容易变脏的地方：同一个意思换个说法加二十遍，
+        // 而每次能注入的只有几条 —— 等于把真正有用的挤出去。
+        let (db, dir) = temp_db();
+        db.memory_add("用户喜欢用 Rust 写程序", "tool").unwrap();
+        let again = db.memory_add("用户喜欢用 Rust 写代码", "tool").unwrap();
+
+        assert!(again.merged, "换个说法应当合并而不是新增");
+        assert_eq!(db.memory_count().unwrap(), 1, "不该攒成两条");
+        assert_eq!(
+            db.memory_list().unwrap()[0].text,
+            "用户喜欢用 Rust 写代码",
+            "合并时用新的说法（信息更新）"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_genuinely_new_memory_is_still_added() {
+        // 去重不能过头：不相关的内容必须还能加进来
+        let (db, dir) = temp_db();
+        db.memory_add("用户喜欢用 Rust 写程序", "tool").unwrap();
+        let other = db.memory_add("用户住在杭州", "tool").unwrap();
+        assert!(!other.merged);
+        assert_eq!(db.memory_count().unwrap(), 2);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn memory_relevant_picks_only_related_ones_in_score_order() {
+        let (db, dir) = temp_db();
+        db.memory_add("用户偏好 Rust 而不是 Python", "tool")
+            .unwrap();
+        db.memory_add("用户在做一个桌面 AI 助手", "tool").unwrap();
+        db.memory_add("用户的猫叫团子", "tool").unwrap();
+
+        let hits = db
+            .memory_relevant("Rust", crate::memory::INJECT_LIMIT)
+            .unwrap();
+        assert_eq!(hits.len(), 1, "只有一条与 Rust 相关：{hits:?}");
+        assert!(hits[0].text.contains("Rust"));
+
+        // 不相关的查询返回空（注入不相关的记忆只会干扰模型）
+        assert!(db
+            .memory_relevant("量子力学", crate::memory::INJECT_LIMIT)
+            .unwrap()
+            .is_empty());
+        // 空查询也安全
+        assert!(db.memory_relevant("   ", 5).unwrap().is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn memory_mark_used_counts_and_stamps() {
+        let (db, dir) = temp_db();
+        let added = db.memory_add("用户偏好 Rust", "tool").unwrap();
+        let id = added.memory.id.clone();
+
+        db.memory_mark_used(std::slice::from_ref(&id)).unwrap();
+        db.memory_mark_used(std::slice::from_ref(&id)).unwrap();
+
+        let memory = db.memory_list().unwrap().into_iter().next().unwrap();
+        assert_eq!(memory.used_count, 2);
+        assert!(memory.last_used_at.is_some(), "应当记下最后一次使用时间");
+
+        // 空列表是合法输入（没有命中记忆时不会调用，但不该报错）
+        db.memory_mark_used(&[]).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn memory_delete_removes_only_that_one() {
+        let (db, dir) = temp_db();
+        let keep = db.memory_add("用户偏好 Rust", "tool").unwrap();
+        let drop = db.memory_add("用户的猫叫团子", "tool").unwrap();
+
+        db.memory_delete(&drop.memory.id).unwrap();
+        assert_eq!(db.memory_count().unwrap(), 1);
+        assert_eq!(db.memory_list().unwrap()[0].id, keep.memory.id);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn memory_add_rejects_empty_and_overlong_with_clear_messages() {
+        let (db, dir) = temp_db();
+        assert!(db
+            .memory_add("   ", "tool")
+            .unwrap_err()
+            .message
+            .contains("不能为空"));
+        let long = "啊".repeat(crate::memory::MAX_MEMORY_CHARS + 1);
+        let err = db.memory_add(&long, "tool").unwrap_err();
+        assert!(err.message.contains("太长"), "{}", err.message);
+        // 拒收之后库里不该留下东西
+        assert_eq!(db.memory_count().unwrap(), 0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn memory_count_cap_is_enforced_with_a_helpful_message() {
+        let (db, dir) = temp_db();
+        // 用 SQL 直接塞到上限：走 `memory_add` 的话这些「只差一个编号」的内容会被
+        // 去重合并掉（那本身就是被测过的行为），根本到不了上限。
+        db.with_conn(|conn| {
+            for i in 0..crate::memory::MAX_MEMORIES {
+                conn.execute(
+                    "INSERT INTO memories (id, text, source, created_at, updated_at, used_count)
+                     VALUES (?1, ?2, 'user', ?3, ?3, 0)",
+                    rusqlite::params![format!("mem_fill_{i}"), format!("占位内容 {i}"), i],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(db.memory_count().unwrap(), crate::memory::MAX_MEMORIES);
+
+        let err = db.memory_add("再来一条全新的内容 xyz", "user").unwrap_err();
+        assert!(err.message.contains("上限"), "{}", err.message);
+        // 提示要告诉用户去哪儿处理，而不是只说「不行」
+        assert!(err.message.contains("设置"), "{}", err.message);
         std::fs::remove_dir_all(&dir).ok();
     }
 

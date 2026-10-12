@@ -42,6 +42,38 @@ export function previewText(text: string, limit = 160): string {
   return `${flat.slice(0, limit)}…`;
 }
 
+/** 记忆的来源标签。 */
+export function describeMemorySource(source: string): string {
+  return source === "user" ? "手动添加" : "模型记录";
+}
+
+/**
+ * 记忆的副标题：来源 + 用过几次。
+ *
+ * 特意把「用过 0 次」也显示出来：用户据此能发现「记了一堆从来没被用上的东西」，
+ * 那多半意味着该删了。
+ */
+export function describeMemory(memory: {
+  source: string;
+  usedCount: number;
+}): string {
+  const source = describeMemorySource(memory.source);
+  if (memory.usedCount <= 0) return `${source} · 还没被用过`;
+  return `${source} · 用过 ${memory.usedCount} 次`;
+}
+
+/** 记忆概览行。 */
+export function describeMemoryStats(stats: {
+  total: number;
+  limit: number;
+  used: number;
+} | null): string {
+  if (!stats || stats.total === 0) {
+    return "还没有记忆。打开开关后，模型会在对话里自己记下长期有用的事实。";
+  }
+  return `${stats.total} / ${stats.limit} 条，其中 ${stats.used} 条被用过`;
+}
+
 /** 能不能收进知识库的文件（Office 走后端解析，文本走前端读取）。 */
 export const KB_OFFICE_EXTENSIONS = ["docx", "xlsx", "pptx"] as const;
 export const KB_TEXT_EXTENSIONS = [

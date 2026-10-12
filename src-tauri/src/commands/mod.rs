@@ -6,6 +6,7 @@ pub mod diagnostics;
 pub mod documents;
 pub mod history;
 pub mod kb;
+pub mod memory;
 pub mod providers;
 pub mod settings;
 pub mod usage;

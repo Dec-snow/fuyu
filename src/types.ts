@@ -106,6 +106,29 @@ export interface AppConfig {
   imageModel: string;
   /** 文生图的尺寸，形如 1024x1024。 */
   imageSize: string;
+  /** 从哪个仓库查更新（用户名/仓库名）。 */
+  updateRepo: string;
+  /** 启动时自动检查一次更新。 */
+  checkUpdatesOnStart: boolean;
+  /** 用户主动跳过的版本。 */
+  skippedVersion: string;
+}
+
+/** 一次更新检查的结果。 */
+export interface UpdateCheck {
+  current: string;
+  /** 最新发布的版本号；
+ull = 仓库还没有发布过版本。 */
+  latest: string | null;
+  hasUpdate: boolean;
+  /** 用户主动跳过了这个版本。 */
+  skipped: boolean;
+  notes: string;
+  pageUrl: string;
+  publishedAt: string;
+  assetName: string | null;
+  assetSize: number | null;
+  checkedAt: number;
 }
 
 /** 一次文生图的结果。 */

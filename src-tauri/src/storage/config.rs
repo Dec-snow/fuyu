@@ -322,6 +322,17 @@ pub struct AppConfig {
     /// 文生图的尺寸，形如 1024x1024。
     #[serde(default = "default_image_size")]
     pub image_size: String,
+    /// 从哪个仓库查更新（用户名/仓库名）。
+    ///
+    /// 做成配置而不是写死：这是个会被 fork 的项目，写死之后别人改了源码才能用。
+    #[serde(default = "default_update_repo")]
+    pub update_repo: String,
+    /// 启动时自动检查一次更新。
+    #[serde(default = "default_true")]
+    pub check_updates_on_start: bool,
+    /// 用户主动跳过的版本（有新版但等于它时不再提示）。
+    #[serde(default)]
+    pub skipped_version: String,
 }
 
 /// 一问多答里的一个目标（服务商 + 模型）。
@@ -338,6 +349,15 @@ fn default_window_opacity() -> f32 {
 
 fn default_font_size() -> f32 {
     DEFAULT_FONT_SIZE
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// 默认的更新检查仓库。
+fn default_update_repo() -> String {
+    "Dec-snow/fuyu".to_string()
 }
 
 /// 文生图的默认尺寸。
@@ -383,6 +403,9 @@ impl Default for AppConfig {
             image_provider_id: String::new(),
             image_model: String::new(),
             image_size: default_image_size(),
+            update_repo: default_update_repo(),
+            check_updates_on_start: true,
+            skipped_version: String::new(),
         }
     }
 }

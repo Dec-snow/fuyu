@@ -58,6 +58,9 @@ windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
     "Win32_UI_Input_KeyboardAndMouse",
+    # 用系统默认浏览器打开发布页（ShellExecuteW）。
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 [profile.release]

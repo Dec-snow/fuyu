@@ -25,6 +25,7 @@ import type {
   ProvidersState,
   RolePreset,
   StoredMessage,
+  UpdateCheck,
   UsageReport,
 } from "../types";
 
@@ -46,6 +47,10 @@ export interface SettingsPatch {
   compareTargets?: CompareTarget[];
   /** 技能列表（整表覆写）。 */
   skills?: SkillPreset[];
+  /** 更新检查的仓库与开关。 */
+  updateRepo?: string;
+  checkUpdatesOnStart?: boolean;
+  skippedVersion?: string;
   /** 文生图的服务商 / 模型 / 尺寸。 */
   imageProviderId?: string;
   imageModel?: string;
@@ -128,6 +133,11 @@ export const api = {
     /** 本次使用的技能（一次性任务指令 + 工具白名单）。 */
     skillId?: string | null;
   }) => invoke<string>("chat_send", { request }),
+  /** 检查更新（orce 为真时忽略缓存）。 */
+  checkUpdate: (force: boolean) =>
+    invoke<UpdateCheck>("check_update", { force }),
+  /** 用系统默认浏览器打开发布页。 */
+  openUpdatePage: (url: string) => invoke<void>("open_update_page", { url }),
   /** 文生图：向服务商的 images/generations 发一次请求。 */
   generateImage: (prompt: string, size?: string | null) =>
     invoke<GeneratedImage>("generate_image", { prompt, size: size ?? null }),

@@ -19,6 +19,7 @@ mod models;
 mod state;
 mod storage;
 mod tools;
+mod update;
 mod window;
 
 use tauri::Manager;
@@ -78,6 +79,9 @@ pub fn run() {
             commands::autostart::started_minimized,
             // ---- 用量与费用
             commands::usage::usage_report,
+            // ---- 检查更新
+            commands::update::check_update,
+            commands::update::open_update_page,
             // ---- 文生图
             commands::image::generate_image,
             commands::image::append_image_turn,

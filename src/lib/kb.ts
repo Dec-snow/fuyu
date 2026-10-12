@@ -42,6 +42,14 @@ export function previewText(text: string, limit = 160): string {
   return `${flat.slice(0, limit)}…`;
 }
 
+/** 字节数：给安装包大小用。 */
+export function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "未知大小";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
 /** 记忆的来源标签。 */
 export function describeMemorySource(source: string): string {
   return source === "user" ? "手动添加" : "模型记录";

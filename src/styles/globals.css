@@ -1241,6 +1241,20 @@ textarea {
   border-radius: 7px;
 }
 
+.update-notes {
+  max-height: 200px;
+  overflow: auto;
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--code-bg);
+  font-size: 11.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .skill-tools {
   display: flex;
   flex-direction: column;

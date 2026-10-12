@@ -12,6 +12,7 @@ import {
   startEventBridge,
 } from "./services/events";
 import { bindChatEvents, useChat } from "./stores/chat";
+import { shouldNotify } from "./lib/update";
 import { bindCompareEvents } from "./stores/compare";
 import { applyAppearance, applyTheme, useConfig } from "./stores/config";
 import { useProviders } from "./stores/providers";
@@ -154,6 +155,27 @@ async function boot() {
   } catch (e) {
     useUi.getState().pushNotice(`载入配置失败：${e}`);
   }
+
+  // 2.5) 启动时查一次更新。
+  //
+  // 三件事都想清楚了才这么写：
+  // - **不 await**：它要连 GitHub，慢的时候好几秒，绝不能挡住窗口显示；
+  // - **失败完全静默**：断网、公司网络挡了 github、GitHub 限流 —— 这些都不是
+  //   用户需要知道的事，弹一句「检查更新失败」只会让人以为软件坏了；
+  // - **只有「有新版且没被跳过」才提示**：判断在 `lib/update.ts` 里，有测试盯着。
+  void (async () => {
+    if (!useConfig.getState().config?.checkUpdatesOnStart) return;
+    try {
+      const check = await api.checkUpdate(false);
+      if (shouldNotify(check)) {
+        useUi
+          .getState()
+          .pushNotice(`有新版本 ${check.latest}，可在「设置 → 关于」里查看`);
+      }
+    } catch {
+      // 静默：见上面的理由
+    }
+  })();
 
   // 3) 恢复上次的窗口形态，再显示窗口。
   //

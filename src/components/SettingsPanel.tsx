@@ -35,6 +35,7 @@ import { useChat } from "../stores/chat";
 import { applyAppearance, previewAppearance, useConfig } from "../stores/config";
 import { useProviders } from "../stores/providers";
 import { blankSkill } from "../lib/skills";
+import { describeAsset, describeUpdate, updateStatus } from "../lib/update";
 import { useUi } from "../stores/ui";
 import type {
   Diagnostics,
@@ -46,6 +47,7 @@ import type {
   ProviderView,
   RolePreset,
   SkillPreset,
+  UpdateCheck,
   UsageReport,
 } from "../types";
 import { CopyButton } from "./CopyButton";
@@ -2113,6 +2115,124 @@ function DiagnosticsPanel() {
   );
 }
 
+/**
+ * 检查更新。
+ *
+ * 刻意**只做检查 + 告知 + 打开下载页**：没有代码签名的情况下，「自动下载并运行
+ * 一个新版本」等于把「用户信任这个应用」换成「用户信任应用访问的每一个环节」。
+ * 库里也没有引入 `tauri-plugin-updater`（它要求签名密钥）。这条取舍写在界面上，
+ * 而不是藏着 —— 用户看到「不会自动安装」比看到「检查更新」更该被告知。
+ */
+function UpdateSection() {
+  const config = useConfig((s) => s.config);
+  const patch = useConfig((s) => s.patch);
+  const pushNotice = useUi((s) => s.pushNotice);
+  const [check, setCheck] = useState<UpdateCheck | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  if (!config) return null;
+
+  const run = async (force: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      setCheck(await api.checkUpdate(force));
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const openPage = async (url: string) => {
+    try {
+      await api.openUpdatePage(url);
+    } catch (e) {
+      // 打不开浏览器至少要把话说清楚，用户还能自己复制地址
+      pushNotice(`打不开浏览器：${e}`);
+    }
+  };
+
+  const status = check ? updateStatus(check) : null;
+
+  return (
+    <div className="field">
+      <span>检查更新</span>
+      <label className="field checkbox">
+        <input
+          type="checkbox"
+          checked={config.checkUpdatesOnStart}
+          onChange={(e) => void patch({ checkUpdatesOnStart: e.target.checked })}
+        />
+        <span>启动时检查一次</span>
+      </label>
+
+      <div className="danger-row">
+        <button className="ghost-button" disabled={busy} onClick={() => void run(true)}>
+          {busy ? "检查中…" : "检查更新"}
+        </button>
+        {status?.kind === "available" || status?.kind === "skipped" ? (
+          <button
+            className="ghost-button"
+            onClick={() => void openPage(check?.pageUrl ?? "")}
+          >
+            打开下载页
+          </button>
+        ) : null}
+        {status?.kind === "available" ? (
+          <button
+            className="ghost-button"
+            title="以后不再提示这个版本"
+            onClick={async () => {
+              await patch({ skippedVersion: check?.latest ?? "" });
+              await run(true);
+            }}
+          >
+            跳过这个版本
+          </button>
+        ) : null}
+        {status?.kind === "skipped" ? (
+          <button
+            className="ghost-button"
+            onClick={async () => {
+              await patch({ skippedVersion: "" });
+              await run(true);
+            }}
+          >
+            取消跳过
+          </button>
+        ) : null}
+      </div>
+
+      {error !== null ? (
+        <div className="settings-hint">检查失败：{error}</div>
+      ) : check ? (
+        <>
+          <div className="settings-hint">{describeUpdate(check)}</div>
+          {describeAsset(check) ? (
+            <div className="settings-hint">安装包：{describeAsset(check)}</div>
+          ) : null}
+          {check.notes ? <pre className="update-notes">{check.notes}</pre> : null}
+        </>
+      ) : (
+        <div className="settings-hint">
+          还没检查过。只会读取 GitHub 上的发布信息，**不会**自动下载或安装 ——
+          新版本要你自己去下载页取。
+        </div>
+      )}
+
+      <input
+        className="kb-title"
+        placeholder="更新仓库：用户名/仓库名"
+        title="从哪个仓库查更新（fork 之后改这里）"
+        value={config.updateRepo}
+        onChange={(e) => void patch({ updateRepo: e.target.value })}
+      />
+    </div>
+  );
+}
+
 function AboutTab() {
   const info = useConfig((s) => s.info);
   const [totals, setTotals] = useState({ inputTokens: 0, outputTokens: 0 });
@@ -2130,6 +2250,8 @@ function AboutTab() {
         <span>版本</span>
         <div className="settings-hint">{info?.version ?? "–"}</div>
       </div>
+
+      <UpdateSection />
       <div className="field">
         <span>累计 token 用量</span>
         <div className="settings-hint">

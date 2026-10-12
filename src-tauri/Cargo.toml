@@ -30,6 +30,8 @@ tokio = { version = "1", features = [
     "rt-multi-thread",
     "net",
     "io-util",
+    # MCP 客户端要拉起本地 MCP 服务端进程（tokio::process）。
+    "process",
 ] }
 tokio-util = "0.7"
 futures-util = "0.3"

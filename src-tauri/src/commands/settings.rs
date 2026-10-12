@@ -244,15 +244,16 @@ fn clamp_font_size(v: f32) -> AppResult<f32> {
 /// 用 `web_search_enabled = true` 取全集：搜索工具是否可用取决于用户有没有配
 /// 端点，但**能不能永久允许**不该跟着变，否则关掉搜索再打开就会丢掉授权。
 fn sanitize_always_allowed(tools: Vec<String>) -> AppResult<Vec<String>> {
-    let known: Vec<&str> =
+    // 名字现在是 owned `String`（MCP 工具是运行时发现的），所以这里也用 String 收集
+    let known: Vec<String> =
         crate::tools::registry::tool_definitions(crate::tools::registry::ToolAvailability::all())
-            .iter()
+            .into_iter()
             .map(|d| d.name)
             .collect();
 
     let mut next = Vec::with_capacity(tools.len());
     for name in tools {
-        if !known.contains(&name.as_str()) {
+        if !known.contains(&name) {
             return Err(AppError::invalid(format!("未知的工具名：{name}")));
         }
         next.push(name);

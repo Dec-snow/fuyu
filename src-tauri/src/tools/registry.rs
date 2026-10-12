@@ -55,8 +55,10 @@ impl ToolResult {
 /// 工具元数据（纯数据）。
 #[derive(Debug, Clone)]
 pub struct ToolDefinition {
-    pub name: &'static str,
-    pub description: &'static str,
+    /// 工具名。内置工具是字面量，MCP 工具是**运行时发现**的 —— 所以这里是
+    /// owned String 而不是 &'static str：MCP 服务器的工具名不可能在编译期知道。
+    pub name: String,
+    pub description: String,
     pub parameters: Value,
     /// 执行前是否需要用户审批。
     pub sensitive: bool,
@@ -97,16 +99,16 @@ impl ToolAvailability {
 pub fn tool_definitions(availability: ToolAvailability) -> Vec<ToolDefinition> {
     let mut tools = vec![
         ToolDefinition {
-            name: "get_current_time",
+            name: "get_current_time".to_string(),
             description:
-                "获取当前本地日期与时间（含星期几）。当你需要知道「现在几点 / 今天几号」时使用。",
+                "获取当前本地日期与时间（含星期几）。当你需要知道「现在几点 / 今天几号」时使用。".to_string(),
             parameters: json!({ "type": "object", "properties": {}, "additionalProperties": false }),
             sensitive: false,
             exfiltrates: false,
         },
         ToolDefinition {
-            name: "calculator",
-            description: "计算一个只含数字、四则运算（+ - * /）与括号的算术表达式。",
+            name: "calculator".to_string(),
+            description: "计算一个只含数字、四则运算（+ - * /）与括号的算术表达式。".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -122,15 +124,15 @@ pub fn tool_definitions(availability: ToolAvailability) -> Vec<ToolDefinition> {
             exfiltrates: false,
         },
         ToolDefinition {
-            name: "read_clipboard_text",
-            description: "读取系统剪贴板里的文本内容。",
+            name: "read_clipboard_text".to_string(),
+            description: "读取系统剪贴板里的文本内容。".to_string(),
             parameters: json!({ "type": "object", "properties": {}, "additionalProperties": false }),
             sensitive: true,
             exfiltrates: false,
         },
         ToolDefinition {
-            name: "write_clipboard_text",
-            description: "把文本写入系统剪贴板。",
+            name: "write_clipboard_text".to_string(),
+            description: "把文本写入系统剪贴板。".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": { "text": { "type": "string", "description": "要写入剪贴板的文本" } },
@@ -141,9 +143,9 @@ pub fn tool_definitions(availability: ToolAvailability) -> Vec<ToolDefinition> {
             exfiltrates: false,
         },
         ToolDefinition {
-            name: "fetch_webpage",
+            name: "fetch_webpage".to_string(),
             description:
-                "抓取一个网页并转成纯文本。只支持 http / https，且只能访问公网地址（内网与本机地址会被拒绝）。",
+                "抓取一个网页并转成纯文本。只支持 http / https，且只能访问公网地址（内网与本机地址会被拒绝）。".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -167,9 +169,10 @@ pub fn tool_definitions(availability: ToolAvailability) -> Vec<ToolDefinition> {
 
     if availability.web_search {
         tools.push(ToolDefinition {
-            name: "web_search",
+            name: "web_search".to_string(),
             description:
-                "用搜索引擎检索网页，返回标题、网址与摘要。需要先在设置里配置 SearXNG 端点。",
+                "用搜索引擎检索网页，返回标题、网址与摘要。需要先在设置里配置 SearXNG 端点。"
+                    .to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -190,10 +193,10 @@ pub fn tool_definitions(availability: ToolAvailability) -> Vec<ToolDefinition> {
 
     if availability.knowledge_base {
         tools.push(ToolDefinition {
-            name: "search_knowledge_base",
+            name: "search_knowledge_base".to_string(),
             description:
                 "在用户自己导入的本地知识库里检索（BM25 全文检索），返回最相关的若干片段与来源文档。\
-                 当问题涉及用户导入的资料、笔记、手册时使用；它只能看到用户已经导入的内容。",
+                 当问题涉及用户导入的资料、笔记、手册时使用；它只能看到用户已经导入的内容。".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -217,10 +220,11 @@ pub fn tool_definitions(availability: ToolAvailability) -> Vec<ToolDefinition> {
 
     if availability.memory {
         tools.push(ToolDefinition {
-            name: "remember",
+            name: "remember".to_string(),
             description: "把关于用户的、**以后还用得上**的事实记下来（长期偏好、正在做的项目、\
                          固定的工作习惯）。只记长期有效的信息；一次性的事情、能从这次对话里\
-                         直接看出来的、以及任何敏感信息都不要记。",
+                         直接看出来的、以及任何敏感信息都不要记。"
+                .to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -260,7 +264,7 @@ pub fn tools_for(
     };
     tools
         .into_iter()
-        .filter(|tool| whitelist.iter().any(|name| name == tool.name))
+        .filter(|tool| whitelist.contains(&tool.name))
         .collect()
 }
 
@@ -601,7 +605,7 @@ mod tests {
         }
     }
 
-    fn names(availability: ToolAvailability) -> Vec<&'static str> {
+    fn names(availability: ToolAvailability) -> Vec<String> {
         tool_definitions(availability)
             .into_iter()
             .map(|tool| tool.name)
@@ -611,8 +615,8 @@ mod tests {
     #[test]
     fn web_search_is_hidden_until_it_is_configured() {
         // 没配搜索服务时不下发这个工具：模型看不到，就不会白烧一轮去调它。
-        assert!(!names(ToolAvailability::default()).contains(&"web_search"));
-        assert!(names(ToolAvailability::all()).contains(&"web_search"));
+        assert!(!names(ToolAvailability::default()).contains(&"web_search".to_string()));
+        assert!(names(ToolAvailability::all()).contains(&"web_search".to_string()));
         // 其它工具不受影响。
         for always in [
             "get_current_time",
@@ -622,7 +626,7 @@ mod tests {
             "fetch_webpage",
         ] {
             assert!(
-                names(ToolAvailability::default()).contains(&always),
+                names(ToolAvailability::default()).contains(&always.to_string()),
                 "{always} 应当始终可用"
             );
         }
@@ -664,8 +668,8 @@ mod tests {
     fn knowledge_base_tool_is_hidden_until_the_library_has_documents() {
         // 与 web_search 同一个原则：库是空的就不下发 —— 否则模型会去调一个
         // 必然空手而归的工具，白烧一轮 token。
-        assert!(!names(ToolAvailability::default()).contains(&"search_knowledge_base"));
-        assert!(names(ToolAvailability::all()).contains(&"search_knowledge_base"));
+        assert!(!names(ToolAvailability::default()).contains(&"search_knowledge_base".to_string()));
+        assert!(names(ToolAvailability::all()).contains(&"search_knowledge_base".to_string()));
     }
 
     #[tokio::test]
@@ -736,8 +740,8 @@ mod tests {
             knowledge_base: false,
             memory: false,
         };
-        assert!(!names(off).contains(&"remember"));
-        assert!(names(ToolAvailability::all()).contains(&"remember"));
+        assert!(!names(off).contains(&"remember".to_string()));
+        assert!(names(ToolAvailability::all()).contains(&"remember".to_string()));
     }
 
     #[tokio::test]
@@ -792,13 +796,13 @@ mod tests {
     #[test]
     fn a_whitelist_keeps_only_the_named_tools() {
         let allow = vec!["calculator".to_string(), "get_current_time".to_string()];
-        let names: Vec<&str> = tools_for(ToolAvailability::all(), Some(&allow))
+        let names: Vec<String> = tools_for(ToolAvailability::all(), Some(&allow))
             .into_iter()
             .map(|t| t.name)
             .collect();
         assert_eq!(names, vec!["get_current_time", "calculator"]);
-        assert!(!names.contains(&"web_search"));
-        assert!(!names.contains(&"read_clipboard_text"));
+        assert!(!names.contains(&"web_search".to_string()));
+        assert!(!names.contains(&"read_clipboard_text".to_string()));
     }
 
     #[test]
@@ -811,7 +815,7 @@ mod tests {
             knowledge_base: false,
             memory: false,
         };
-        let names: Vec<&str> = tools_for(off, Some(&allow))
+        let names: Vec<String> = tools_for(off, Some(&allow))
             .into_iter()
             .map(|t| t.name)
             .collect();
@@ -822,7 +826,7 @@ mod tests {
             web_search: true,
             ..off
         };
-        let names: Vec<&str> = tools_for(on, Some(&allow))
+        let names: Vec<String> = tools_for(on, Some(&allow))
             .into_iter()
             .map(|t| t.name)
             .collect();
@@ -865,7 +869,7 @@ mod tests {
     #[tokio::test]
     async fn all_tools_are_discoverable_and_executable() {
         for tool in tool_definitions(ToolAvailability::all()) {
-            assert!(find(tool.name).is_some(), "{} 应当能被找到", tool.name);
+            assert!(find(&tool.name).is_some(), "{} 应当能被找到", tool.name);
         }
         // 未知工具给出错误而非 panic。
         assert!(execute("nope", &json!({}), &ctx()).await.is_error);

@@ -14,6 +14,11 @@ mod diagnostics;
 mod documents;
 mod errors;
 mod kb;
+// MCP：协议层与进程客户端已经可用并由测试覆盖（含真拉子进程的集成测试），
+// 但「把发现的工具交给模型调用」这条链路还没接 —— 那几个函数目前只有测试在用。
+// 接线之后这个 allow 就撤掉（它是临时的，不该长期留着）。
+#[allow(dead_code)]
+mod mcp;
 mod memory;
 mod models;
 mod state;
@@ -79,6 +84,9 @@ pub fn run() {
             commands::autostart::started_minimized,
             // ---- 用量与费用
             commands::usage::usage_report,
+            // ---- MCP 客户端
+            commands::mcp::mcp_status,
+            commands::mcp::mcp_shutdown,
             // ---- 检查更新
             commands::update::check_update,
             commands::update::open_update_page,

@@ -8,6 +8,7 @@ pub mod documents;
 pub mod history;
 pub mod image;
 pub mod kb;
+pub mod mcp;
 pub mod memory;
 pub mod providers;
 pub mod settings;

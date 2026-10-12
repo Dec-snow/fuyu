@@ -874,7 +874,7 @@ async fn request_approval(
     logs: &crate::diagnostics::LogBuffer,
 ) -> bool {
     // 1) 永久允许。
-    if config.read(|c| c.always_allowed_tools.iter().any(|t| t == tool.name)) {
+    if config.read(|c| c.always_allowed_tools.contains(&tool.name)) {
         return true;
     }
     // 2) 本次会话允许。
@@ -950,7 +950,7 @@ async fn request_approval(
                     // 工具还要再问一遍。如果这里悄悄吞掉错误，这个现象没有任何线索
                     // 可查（用户只会觉得「这软件记性有问题」）。
                     if let Err(e) = config.update(|cfg| {
-                        if !cfg.always_allowed_tools.iter().any(|t| t == tool.name) {
+                        if !cfg.always_allowed_tools.contains(&tool.name) {
                             cfg.always_allowed_tools.push(tool.name.to_string());
                         }
                         Ok(())

@@ -51,6 +51,26 @@ pub struct Role {
     pub builtin: bool,
 }
 
+/// 一个 MCP 服务器。
+///
+/// 只支持 stdio 传输：command + rgs 就是要启动的本地进程。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerConfig {
+    pub id: String,
+    pub name: String,
+    /// 要启动的命令（npx / uvx / node / 一个 exe 路径）。
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// 额外环境变量（例如 API Key）。
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
+    /// 关掉但保留配置（比删掉再重建友好）。
+    #[serde(default)]
+    pub enabled: bool,
+}
+
 /// 技能：**一次性的任务指令**，只作用于当前这条消息。
 ///
 /// ## 与「角色」的区别（这是它值得单独存在的理由）
@@ -322,6 +342,9 @@ pub struct AppConfig {
     /// 文生图的尺寸，形如 1024x1024。
     #[serde(default = "default_image_size")]
     pub image_size: String,
+    /// MCP 服务器列表。
+    #[serde(default)]
+    pub mcp_servers: Vec<McpServerConfig>,
     /// 从哪个仓库查更新（用户名/仓库名）。
     ///
     /// 做成配置而不是写死：这是个会被 fork 的项目，写死之后别人改了源码才能用。
@@ -403,6 +426,7 @@ impl Default for AppConfig {
             image_provider_id: String::new(),
             image_model: String::new(),
             image_size: default_image_size(),
+            mcp_servers: Vec::new(),
             update_repo: default_update_repo(),
             check_updates_on_start: true,
             skipped_version: String::new(),

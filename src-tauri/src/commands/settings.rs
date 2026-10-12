@@ -6,8 +6,8 @@ use tauri::State;
 use crate::errors::{AppError, AppResult};
 use crate::models::config::AppInfo;
 use crate::storage::config::{
-    AppConfig, CompareTarget, ConfigStore, ProviderConfig, Role, Skill, MAX_FONT_SIZE,
-    MIN_FONT_SIZE, MIN_WINDOW_OPACITY,
+    AppConfig, CompareTarget, ConfigStore, McpServerConfig, ProviderConfig, Role, Skill,
+    MAX_FONT_SIZE, MIN_FONT_SIZE, MIN_WINDOW_OPACITY,
 };
 use crate::storage::database::Database;
 
@@ -68,6 +68,8 @@ pub struct SettingsPatch {
     pub compare_targets: Option<Vec<CompareTarget>>,
     /// 技能列表（整表覆写）。
     pub skills: Option<Vec<Skill>>,
+    /// MCP 服务器列表（整表覆写）。
+    pub mcp_servers: Option<Vec<McpServerConfig>>,
 }
 
 /// 角色数量上限。
@@ -83,6 +85,80 @@ const MAX_SKILLS: usize = 50;
 const MAX_ROLES: usize = 50;
 /// 单个角色提示词的长度上限（字符数）。
 const MAX_ROLE_PROMPT_CHARS: usize = 4_000;
+
+/// 规整 MCP 服务器列表。
+///
+/// 三条校验，都是「不校验就会在运行时变成怪现象」的：
+/// - **命令不能为空**：空命令会在 `Command::new("")` 那里报一个很难懂的系统错误；
+/// - **id 不能重复**：重复 id 会让两个服务器共用一个会话（后一个的工具跑到
+///   前一个进程里去执行），这是最难查的一类错；
+/// - **数量上限**：每个服务器都是一个常驻子进程，而它们的工具会全部出现在模型的
+///   工具清单里 —— 工具太多会明显拉低它挑对工具的概率。
+///
+/// 长度也做上限：环境变量里常放 API Key，粘贴时很容易带进来一整段无关内容。
+fn sanitize_mcp_servers(servers: Vec<McpServerConfig>) -> AppResult<Vec<McpServerConfig>> {
+    if servers.len() > crate::mcp::MAX_SERVERS {
+        return Err(AppError::invalid(format!(
+            "MCP 服务器最多 {} 个",
+            crate::mcp::MAX_SERVERS
+        )));
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(servers.len());
+    for mut server in servers {
+        server.id = server.id.trim().to_string();
+        server.name = server.name.trim().to_string();
+        server.command = server.command.trim().to_string();
+        server.args = server
+            .args
+            .iter()
+            .map(|a| a.trim().to_string())
+            .filter(|a| !a.is_empty())
+            .collect();
+        server.env = server
+            .env
+            .into_iter()
+            .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+            .filter(|(k, _)| !k.is_empty())
+            .collect();
+
+        if server.name.is_empty() {
+            return Err(AppError::invalid("MCP 服务器要有个名字"));
+        }
+        if server.command.is_empty() {
+            return Err(AppError::invalid(format!(
+                "MCP 服务器「{}」没有填要启动的命令",
+                server.name
+            )));
+        }
+        if server.id.is_empty() {
+            return Err(AppError::invalid(format!(
+                "MCP 服务器「{}」缺少 id",
+                server.name
+            )));
+        }
+        if !seen.insert(server.id.clone()) {
+            return Err(AppError::invalid(format!(
+                "MCP 服务器 id 重复：{}",
+                server.id
+            )));
+        }
+        if server.command.chars().count() > crate::mcp::MAX_FIELD_CHARS
+            || server
+                .args
+                .iter()
+                .any(|a| a.chars().count() > crate::mcp::MAX_FIELD_CHARS)
+        {
+            return Err(AppError::invalid(format!(
+                "MCP 服务器「{}」的命令或参数太长",
+                server.name
+            )));
+        }
+        out.push(server);
+    }
+    Ok(out)
+}
 
 /// 规整技能列表。
 ///
@@ -354,6 +430,9 @@ pub async fn update_settings(
         if let Some(skills) = patch.skills {
             cfg.skills = sanitize_skills(skills)?;
         }
+        if let Some(servers) = patch.mcp_servers {
+            cfg.mcp_servers = sanitize_mcp_servers(servers)?;
+        }
         // 改完代理立刻重建 HTTP 客户端，否则要重启才生效。
         Ok(cfg.clone())
     })
@@ -438,6 +517,77 @@ mod tests {
             tools: Vec::new(),
             builtin: false,
         }
+    }
+
+    // ---------------- MCP 服务器
+
+    fn mcp(id: &str, name: &str, command: &str) -> McpServerConfig {
+        McpServerConfig {
+            id: id.to_string(),
+            name: name.to_string(),
+            command: command.to_string(),
+            args: Vec::new(),
+            env: Default::default(),
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn a_sane_mcp_list_passes_and_gets_trimmed() {
+        let mut server = mcp(" s1 ", "  文件服务 ", "  npx ");
+        server.args = vec![
+            " -y ".to_string(),
+            "".to_string(),
+            " server-filesystem ".to_string(),
+        ];
+        let out = sanitize_mcp_servers(vec![server]).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].id, "s1");
+        assert_eq!(out[0].name, "文件服务");
+        assert_eq!(out[0].command, "npx");
+        // 参数去空格、空项丢掉（空参数会让命令行为变得莫名其妙）
+        assert_eq!(
+            out[0].args,
+            vec!["-y".to_string(), "server-filesystem".to_string()]
+        );
+    }
+
+    #[test]
+    fn an_mcp_server_without_a_command_says_which_one() {
+        let err = sanitize_mcp_servers(vec![mcp("s1", "文件服务", "  ")]).unwrap_err();
+        assert!(
+            err.message.contains("文件服务"),
+            "要说清是哪个：{}",
+            err.message
+        );
+        assert!(err.message.contains("命令"), "{}", err.message);
+    }
+
+    #[test]
+    fn duplicate_mcp_ids_are_rejected() {
+        // 重复 id 会让两个服务器共用一个会话 —— 后一个的工具跑到前一个进程里执行，
+        // 这是最难查的一类错，宁可在保存时直接拒掉
+        let err = sanitize_mcp_servers(vec![mcp("same", "甲", "node"), mcp("same", "乙", "node")])
+            .unwrap_err();
+        assert!(err.message.contains("重复"), "{}", err.message);
+    }
+
+    #[test]
+    fn too_many_mcp_servers_are_rejected() {
+        let many = (0..=crate::mcp::MAX_SERVERS)
+            .map(|i| mcp(&format!("s{i}"), &format!("服务{i}"), "node"))
+            .collect();
+        assert!(sanitize_mcp_servers(many)
+            .unwrap_err()
+            .message
+            .contains("最多"));
+    }
+
+    #[test]
+    fn an_overlong_mcp_command_is_rejected() {
+        let long = "x".repeat(crate::mcp::MAX_FIELD_CHARS + 1);
+        let err = sanitize_mcp_servers(vec![mcp("s1", "服务", &long)]).unwrap_err();
+        assert!(err.message.contains("太长"), "{}", err.message);
     }
 
     #[test]

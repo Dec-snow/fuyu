@@ -17,6 +17,8 @@ import type {
   KbDocument,
   KbHit,
   KbStats,
+  McpServerConfig,
+  McpServerStatus,
   Memory,
   SkillPreset,
   MemoryAddOutcome,
@@ -47,6 +49,8 @@ export interface SettingsPatch {
   compareTargets?: CompareTarget[];
   /** 技能列表（整表覆写）。 */
   skills?: SkillPreset[];
+  /** MCP 服务器列表（整表覆写）。 */
+  mcpServers?: McpServerConfig[];
   /** 更新检查的仓库与开关。 */
   updateRepo?: string;
   checkUpdatesOnStart?: boolean;
@@ -133,6 +137,10 @@ export const api = {
     /** 本次使用的技能（一次性任务指令 + 工具白名单）。 */
     skillId?: string | null;
   }) => invoke<string>("chat_send", { request }),
+  /** 扫描所有启用的 MCP 服务器，返回连接状态与工具清单。 */
+  mcpStatus: () => invoke<McpServerStatus[]>("mcp_status"),
+  /** 关掉所有 MCP 子进程（退出前调用）。 */
+  mcpShutdown: () => invoke<void>("mcp_shutdown"),
   /** 检查更新（orce 为真时忽略缓存）。 */
   checkUpdate: (force: boolean) =>
     invoke<UpdateCheck>("check_update", { force }),

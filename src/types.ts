@@ -106,12 +106,47 @@ export interface AppConfig {
   imageModel: string;
   /** 文生图的尺寸，形如 1024x1024。 */
   imageSize: string;
+  /** MCP 服务器列表。 */
+  mcpServers: McpServerConfig[];
   /** 从哪个仓库查更新（用户名/仓库名）。 */
   updateRepo: string;
   /** 启动时自动检查一次更新。 */
   checkUpdatesOnStart: boolean;
   /** 用户主动跳过的版本。 */
   skippedVersion: string;
+}
+
+/** 一个 MCP 服务器（stdio：命令 + 参数 + 环境变量）。 */
+export interface McpServerConfig {
+  id: string;
+  name: string;
+  /** 要启动的命令（npx / uvx / node / 一个 exe 路径）。 */
+  command: string;
+  args: string[];
+  /** 额外环境变量。 */
+  env: Record<string, string>;
+  enabled: boolean;
+}
+
+/** 一个 MCP 服务端上报的工具。 */
+export interface McpTool {
+  /** 服务端那边的原始工具名。 */
+  rawName: string;
+  /** 暴露给模型的名字（mcp__服务__工具）。 */
+  name: string;
+  description: string;
+}
+
+/** 一个 MCP 服务器的连接与发现结果。 */
+export interface McpServerStatus {
+  id: string;
+  name: string;
+  connected: boolean;
+  serverName: string | null;
+  serverVersion: string | null;
+  tools: McpTool[];
+  /** 连不上时的原因。 */
+  error: string | null;
 }
 
 /** 一次更新检查的结果。 */

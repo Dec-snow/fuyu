@@ -35,6 +35,7 @@ import { useChat } from "../stores/chat";
 import { applyAppearance, previewAppearance, useConfig } from "../stores/config";
 import { useProviders } from "../stores/providers";
 import { blankSkill } from "../lib/skills";
+import { blankMcpServer, describeMcpStatus, validateMcpServer } from "../lib/mcp";
 import { describeAsset, describeUpdate, updateStatus } from "../lib/update";
 import { useUi } from "../stores/ui";
 import type {
@@ -42,6 +43,8 @@ import type {
   KbDocument,
   KbHit,
   KbStats,
+  McpServerConfig,
+  McpServerStatus,
   Memory,
   MemoryStats,
   ProviderView,
@@ -1189,6 +1192,8 @@ function GeneralTab() {
 
       <AutostartField />
 
+      <McpSection />
+
       <label className="field checkbox">
         <input
           type="checkbox"
@@ -2111,6 +2116,173 @@ function DiagnosticsPanel() {
           <div className="settings-hint">读取中…</div>
         )
       ) : null}
+    </div>
+  );
+}
+
+/**
+ * MCP 服务器。
+ *
+ * 三条设计：
+ * - **扫描要用户手动点**：MCP 服务端常见的形态是 npx -y …，首次运行会去下载包，
+ *   可能几十秒。绝不放在启动路径或发消息路径上（那会变成「软件偶尔卡住几十秒」）。
+ * - **不自动保存错误配置**：名字与命令必填、id 不能重复，先在前端拦一道并当场
+ *   说明原因 —— 后端的校验是最后一道防线，不是给用户看的报错渠道。
+ * - **把工具名列出来**：只显示「3 个工具」用户没法判断接对了没有；列出
+ *   mcp__服务__工具 才能一眼看出是不是自己想要的那个服务。
+ */
+function McpSection() {
+  const config = useConfig((s) => s.config);
+  const patch = useConfig((s) => s.patch);
+  const pushNotice = useUi((s) => s.pushNotice);
+  const [statuses, setStatuses] = useState<McpServerStatus[] | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  if (!config) return null;
+  const servers = config.mcpServers ?? [];
+  const save = (next: McpServerConfig[]) => {
+    void patch({ mcpServers: next }).catch(() => undefined);
+  };
+
+  const scan = async () => {
+    setBusy(true);
+    try {
+      setStatuses(await api.mcpStatus());
+    } catch (e) {
+      pushNotice(`扫描 MCP 服务器失败：${e}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="field">
+      <span>MCP 服务器（本地的 MCP 服务端，它的工具会并进模型的工具清单）</span>
+      <div className="settings-hint">
+        走 stdio：这里填的是要启动的命令。扫描过一次工具才生效（本次运行内有效）。
+        MCP 服务端可以是任意本地程序，所以它的工具一律需要你逐次同意。
+      </div>
+
+      <div className="danger-row">
+        <button className="ghost-button" disabled={busy} onClick={() => void scan()}>
+          {busy ? "扫描中…" : "重新扫描"}
+        </button>
+        <button
+          className="ghost-button"
+          onClick={() => save([...servers, blankMcpServer(servers.length + 1)])}
+        >
+          + 添加服务器
+        </button>
+      </div>
+
+      {servers.length === 0 ? (
+        <div className="settings-hint">还没有配置服务器。</div>
+      ) : (
+        <div className="role-editor">
+          {servers.map((server) => {
+            const status = statuses?.find((s) => s.id === server.id) ?? null;
+            const problem = validateMcpServer(server, servers);
+            return (
+              <div className="role-row" key={server.id}>
+                <div className="role-row-head">
+                  <input
+                    className="role-name"
+                    value={server.name}
+                    onChange={(e) =>
+                      save(
+                        servers.map((s) =>
+                          s.id === server.id ? { ...s, name: e.target.value } : s,
+                        ),
+                      )
+                    }
+                  />
+                  <label className="compare-chip">
+                    <input
+                      type="checkbox"
+                      checked={server.enabled}
+                      onChange={() =>
+                        save(
+                          servers.map((s) =>
+                            s.id === server.id ? { ...s, enabled: !s.enabled } : s,
+                          ),
+                        )
+                      }
+                    />
+                    <span>启用</span>
+                  </label>
+                  <button
+                    className="role-delete"
+                    onClick={() => {
+                      if (window.confirm(`删除 MCP 服务器「${server.name}」？`)) {
+                        save(servers.filter((s) => s.id !== server.id));
+                      }
+                    }}
+                  >
+                    删除
+                  </button>
+                </div>
+
+                <input
+                  className="role-name"
+                  placeholder="启动命令，例如 npx"
+                  value={server.command}
+                  onChange={(e) =>
+                    save(
+                      servers.map((s) =>
+                        s.id === server.id ? { ...s, command: e.target.value } : s,
+                      ),
+                    )
+                  }
+                />
+                <input
+                  className="role-name"
+                  placeholder="参数，用空格分隔（含空格的路径暂不支持）"
+                  value={server.args.join(" ")}
+                  onChange={(e) =>
+                    save(
+                      servers.map((s) =>
+                        s.id === server.id
+                          ? { ...s, args: e.target.value.split(/\s+/).filter(Boolean) }
+                          : s,
+                      ),
+                    )
+                  }
+                />
+                <input
+                  className="role-name"
+                  placeholder="环境变量，形如 KEY=值，多项空格分隔"
+                  value={Object.entries(server.env)
+                    .map(([k, v]) => `${k}=${v}`)
+                    .join(" ")}
+                  onChange={(e) => {
+                    const env: Record<string, string> = {};
+                    for (const pair of e.target.value.split(/\s+/).filter(Boolean)) {
+                      const at = pair.indexOf("=");
+                      if (at > 0) env[pair.slice(0, at)] = pair.slice(at + 1);
+                    }
+                    save(servers.map((s) => (s.id === server.id ? { ...s, env } : s)));
+                  }}
+                />
+
+                {problem !== null ? (
+                  <div className="settings-hint">这条配置还不能用：{problem}</div>
+                ) : status !== null ? (
+                  <>
+                    <div className="settings-hint">{describeMcpStatus(status)}</div>
+                    {status.tools.length > 0 ? (
+                      <div className="settings-hint">
+                        工具：{status.tools.map((t) => t.name).join("、")}
+                      </div>
+                    ) : null}
+                  </>
+                ) : (
+                  <div className="settings-hint">点「重新扫描」看看它提供什么工具</div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

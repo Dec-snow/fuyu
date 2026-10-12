@@ -17,6 +17,7 @@ mod kb;
 mod mcp;
 mod memory;
 mod models;
+mod pdf;
 mod state;
 mod storage;
 mod tools;

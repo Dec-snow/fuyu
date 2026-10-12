@@ -94,7 +94,9 @@ mod tests {
 
     #[tokio::test]
     async fn an_unsupported_extension_is_rejected() {
-        let err = extract_document("报告.pdf".to_string(), "AAAA".to_string())
+        // 用 .doc（老格式）当例子：pdf 现在**是**支持的，拿它当反例会让这条测试
+        // 变成「断言错误的东西」—— 它之前正是这样，被 pdf 的接入打回了。
+        let err = extract_document("报告.doc".to_string(), "AAAA".to_string())
             .await
             .unwrap_err();
         assert!(

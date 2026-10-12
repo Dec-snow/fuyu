@@ -24,7 +24,7 @@ export const MAX_DOCUMENT_BYTES = 9 * 1024 * 1024;
  * 前端要解就得引一堆库。所以它们走 `extract_document` 命令，由 Rust 提取出
  * 文字之后再当成普通附件用。
  */
-export const OFFICE_EXTENSIONS: readonly string[] = ["docx", "xlsx", "pptx"];
+export const OFFICE_EXTENSIONS: readonly string[] = ["docx", "xlsx", "pptx", "pdf"];
 
 /** 是不是需要后端解析的 Office 文档。 */
 export function isOfficeDoc(name: string): boolean {

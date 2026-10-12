@@ -38,6 +38,8 @@ pub enum DocKind {
     Docx,
     Xlsx,
     Pptx,
+    /// PDF：不走 ZIP+XML 那条路（见 crate::pdf）。
+    Pdf,
 }
 
 impl DocKind {
@@ -47,6 +49,7 @@ impl DocKind {
             DocKind::Docx => "Word 文档",
             DocKind::Xlsx => "Excel 表格",
             DocKind::Pptx => "PowerPoint 演示文稿",
+            DocKind::Pdf => "PDF 文档",
         }
     }
 }
@@ -60,12 +63,19 @@ pub fn kind_of(file_name: &str) -> Option<DocKind> {
         "docx" => Some(DocKind::Docx),
         "xlsx" => Some(DocKind::Xlsx),
         "pptx" => Some(DocKind::Pptx),
+        "pdf" => Some(DocKind::Pdf),
         _ => None,
     }
 }
 
 /// 提取正文。
 pub fn extract(kind: DocKind, bytes: &[u8]) -> AppResult<String> {
+    // PDF 不是 ZIP+XML，压根走不了下面那条路 —— 先分流。
+    // （这也是为什么 `DocKind` 要把 Pdf 放进来而不是另开一个函数：
+    //  调用方只该关心「这是个文档」，不该关心它内部是什么容器。）
+    if kind == DocKind::Pdf {
+        return crate::pdf::extract(bytes);
+    }
     let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
         .map_err(|e| AppError::invalid(format!("不是有效的 Office 文档（打不开压缩包）：{e}")))?;
 
@@ -75,6 +85,8 @@ pub fn extract(kind: DocKind, bytes: &[u8]) -> AppResult<String> {
         DocKind::Docx => extract_docx(&mut archive)?,
         DocKind::Xlsx => extract_xlsx(&mut archive)?,
         DocKind::Pptx => extract_pptx(&mut archive)?,
+        // 上面已经分流走了，这里只是让 match 穷尽
+        DocKind::Pdf => unreachable!("PDF 在函数开头就分流了"),
     };
 
     let text = text.trim().to_string();
@@ -585,11 +597,17 @@ mod tests {
     }
 
     #[test]
-    fn kind_of_recognises_the_three_formats() {
+    fn kind_of_recognises_the_supported_formats() {
         assert_eq!(kind_of("报告.docx"), Some(DocKind::Docx));
         assert_eq!(kind_of("BOOK.XLSX"), Some(DocKind::Xlsx));
         assert_eq!(kind_of("slides.pptx"), Some(DocKind::Pptx));
-        assert_eq!(kind_of("a.pdf"), None);
+        // PDF 现在也走后端解析（它同样不是纯文本）
+        assert_eq!(kind_of("a.pdf"), Some(DocKind::Pdf));
+        assert_eq!(
+            kind_of("REPORT.PDF"),
+            Some(DocKind::Pdf),
+            "扩展名大小写不该有影响"
+        );
         assert_eq!(kind_of("noextension"), None);
         assert_eq!(kind_of("a.docx.exe"), None);
     }

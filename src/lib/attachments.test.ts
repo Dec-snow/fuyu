@@ -145,11 +145,11 @@ describe("canAddAttachment", () => {
 });
 
 describe("Office 文档（走后端解析）", () => {
-  it("isOfficeDoc 只认三种扩展名，大小写不敏感", () => {
-    for (const n of ["a.docx", "B.XLSX", "c.pptx"]) {
+  it("isOfficeDoc 认这四种（pdf 也走后端解析），大小写不敏感", () => {
+    for (const n of ["a.docx", "B.XLSX", "c.pptx", "d.PDF"]) {
       expect(isOfficeDoc(n), n).toBe(true);
     }
-    for (const n of ["a.txt", "a.pdf", "a.doc", "a.xls", "a.pptx.exe", "docx"]) {
+    for (const n of ["a.txt", "a.doc", "a.xls", "a.pptx.exe", "docx"]) {
       expect(isOfficeDoc(n), n).toBe(false);
     }
   });

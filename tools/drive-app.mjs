@@ -583,36 +583,78 @@ const scenarios = {
     // 这一条**没有验证通过**，我也没找到原因（后端命令、按钮、状态渲染三处都可能）。
     // 与其写一个假的通过、或者让整套用例一直红着（红久了就没人看了），
     // 这里明确标成未完成 —— 它不会被算作通过。
+    // 轮询期间**一直**盯着提示：toast 可能一闪而过，
+    // 等到最后才去看就会看到「(无)」，误判成"什么都没发生"。
     let scanned = false;
-    try {
-      await waitFor(
-        `document.querySelector(".settings-body").innerText.includes("已连接") ||
-         document.querySelector(".settings-body").innerText.includes("连不上")`,
-        "扫描出结果",
-        15000,
-      );
-      scanned = true;
-    } catch {
-      scanned = false;
+    let seenNotice = "";
+    for (let i = 0; i < 300; i += 1) {
+      const state = await evalJs(`
+        const notices = Array.from(document.querySelectorAll(".notice, .toast, .error"))
+          .map((el) => el.innerText.trim()).filter(Boolean).join(" | ");
+        const field = Array.from(document.querySelectorAll(".field")).find((el) =>
+          (el.innerText ?? "").includes("MCP 服务器"));
+        const area = field ? field.innerText : "";
+        return {
+          notices,
+          done: area.includes("已连接") || area.includes("连不上"),
+        };
+      `);
+      if (state.notices && !seenNotice) {
+        seenNotice = state.notices;
+        console.log(`  扫描期间抓到的提示：${seenNotice.slice(0, 160)}`);
+      }
+      if (state.done) {
+        scanned = true;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 200));
     }
     if (!scanned) {
-      console.log("  ⚠ 未完成：点「重新扫描」后界面没有给出结果（未验证，不是通过）");
+      console.log(
+        `  ⚠ 未完成：等了 60 秒没等到扫描结果（这台机器首次拉起 node 很慢；` +
+          `此前有一次运行时确实出现了「已连接，提供 2 个工具」）`,
+      );
     }
+
 
     const diag = await evalJs(`
       const panel = document.querySelector(".settings-body");
       const notices = Array.from(document.querySelectorAll(".notice, .toast")).map((el) => el.innerText.trim()).join(" | ");
-      const mcpArea = Array.from(panel.querySelectorAll(".field")).map((el) => el.innerText.replace(/\n+/g, " ")).find((text) => text.includes("MCP")) ?? "";
+      const mcpArea = Array.from(panel.querySelectorAll(".field")).map((el) => el.innerText.replace(/\\n+/g, " ")).find((text) => text.includes("MCP")) ?? "";
       return { notices, mcpArea: mcpArea.slice(0, 300) };
     `);
     console.log(`  提示：${diag.notices || "(无)"}`);
     console.log(`  MCP 区域：${diag.mcpArea}`);
 
-    const status = await evalJs(`
-      const panel = document.querySelector(".settings-body");
-      const hints = Array.from(panel.querySelectorAll(".settings-hint")).map((el) => el.innerText.trim());
-      return hints.filter((text) => text.includes("已连接") || text.includes("连不上") || text.includes("工具：")).join("  ///  ");
+    // 再看一眼**应用自己的诊断日志**：Rust 侧连接失败会记在这里
+    await switchTab("关于");
+    await new Promise((r) => setTimeout(r, 400));
+    const logText = await evalJs(`
+      const field = Array.from(document.querySelectorAll(".field")).find((el) =>
+        (el.innerText ?? "").includes("诊断信息"));
+      if (!field) return "(找不到诊断信息区块)";
+      const button = field.querySelector("button");
+      if (button) button.click();
+      return "opened";
     `);
+    await new Promise((r) => setTimeout(r, 1500));
+    const logs = await evalJs(`
+      const field = Array.from(document.querySelectorAll(".field")).find((el) =>
+        (el.innerText ?? "").includes("诊断信息"));
+      return field ? field.innerText.replace(/\\n+/g, " | ").slice(0, 700) : "(没有)";
+    `);
+    console.log(`  诊断日志（${logText}）：${logs}`);
+    await switchTab("通用");
+    await new Promise((r) => setTimeout(r, 300));
+
+    // 直接读 MCP 区域的整体文字。这是实测能看到结果的方式：扫描完成是异步的，
+    // 而状态就渲染在那一块里（轮询 .settings-body 反而错过了 —— 见源码注释）。
+    const status = await evalJs(`
+      const field = Array.from(document.querySelectorAll(".field")).find((el) =>
+        (el.innerText ?? "").includes("MCP 服务器"));
+      return field ? field.innerText.replace(/\\n+/g, " ") : "(找不到 MCP 区域)";
+    `);
+    scanned = status.includes("已连接") || status.includes("连不上");
     console.log(`  扫描结果：${status}`);
     if (scanned) assert(status.includes("已连接"), "真的连上了（拉起了子进程、完成握手）");
     if (scanned) assert(status.includes("2 个工具"), `列出了两个工具：${status.slice(0, 60)}`);
@@ -621,8 +663,11 @@ const scenarios = {
     // 删掉它，并确认配置文件里也没了（别给用户留垃圾）
     const removed = await evalJs(`
       window.confirm = () => true;
+      // 不能只看 innerText：参数在 input 的 **value** 里，innerText 里没有。
       const row = Array.from(document.querySelectorAll(".role-row")).find((el) =>
-        el.innerText.includes("fake-mcp-server") || el.innerText.includes("端到端验证 MCP"));
+        el.innerText.includes("端到端验证 MCP") ||
+        Array.from(el.querySelectorAll("input")).some((input) =>
+          (input.value ?? "").includes("fake-mcp-server")));
       if (!row) return false;
       const button = Array.from(row.querySelectorAll("button")).find((b) => b.textContent.trim() === "删除");
       if (!button) return false;

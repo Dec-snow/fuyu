@@ -37,23 +37,27 @@ fn manager(logs: &LogBuffer) -> Arc<McpManager> {
 #[tauri::command]
 pub async fn mcp_status(
     config: State<'_, ConfigStore>,
-    logs: tauri::State<'_, LogBuffer>,
+    state: State<'_, crate::state::AppState>,
 ) -> AppResult<Vec<McpServerStatus>> {
     // 上限是真实护栏：每个服务器都是一个常驻子进程，而它们的工具会**全部**
     // 出现在模型的工具清单里 —— 工具太多会明显拉低它挑对工具的概率。
     let mut servers = config.read(|cfg| cfg.mcp_servers.clone());
     servers.truncate(crate::mcp::MAX_SERVERS);
-    let manager = manager(&logs);
+    // ⚠️ 这里必须用 `AppState`，不能是 `State<'_, LogBuffer>`：
+    // 应用注册的是 `AppState`（它里面才有 `logs`），而 Tauri 的状态是按**类型**取的。
+    // 写成 `State<'_, LogBuffer>` 的后果是运行时才炸：
+    // "state not managed for field `logs` on command `mcp_status`" ——
+    // Rust 单测全绿（它们不经过 Tauri 的状态管理），只有真机点一下才会暴露。
+    let manager = manager(&state.logs);
     Ok(manager.refresh(&servers).await)
 }
 
 /// 关掉所有 MCP 子进程（退出前调用，免得留下孤儿进程）。
 #[tauri::command]
-pub async fn mcp_shutdown(logs: tauri::State<'_, LogBuffer>) -> AppResult<()> {
+pub async fn mcp_shutdown() -> AppResult<()> {
     if let Some(manager) = MANAGER.get() {
         manager.shutdown().await;
     }
-    let _ = &logs;
     Ok(())
 }
 

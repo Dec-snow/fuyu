@@ -580,6 +580,21 @@ const scenarios = {
       60000,
     );
     await closeSettings();
+
+    // 还要把编写区的工具开关**打开**：它默认是关的（"🔧 工具关"），
+    // 关着的时候请求里根本没有 tools —— 模型不可能去调任何工具。
+    await evalJs(`
+      const button = window.__dsh.byText(".tools-toggle", "工具");
+      if (button && !button.textContent.includes("开")) button.click();
+      return true;
+    `);
+    await new Promise((r) => setTimeout(r, 500));
+    const toolsState = await evalJs(`
+      return (window.__dsh.byText(".tools-toggle", "工具")?.textContent ?? "").trim();
+    `);
+    console.log(`  工具开关：${toolsState}`);
+    assert(toolsState.includes("工具开"), "工具已打开（否则请求里没有 tools）");
+    await expandWindow();
     await expandWindow();
 
     await evalJs(`

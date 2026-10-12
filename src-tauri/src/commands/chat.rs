@@ -529,7 +529,26 @@ async fn run_stream(
                 break;
             }
 
-            let Some(tool) = registry::find(&call.name) else {
+            // MCP 工具**不在静态清单里**（它们是运行时扫描出来的），所以
+            // `registry::find` 找不到 —— 早先这里直接报「未知工具」，
+            // 真机验证时模型明明调用了 mcp__…__echo，界面上却是「✗ 未知工具」。
+            // 这里补一段：MCP 名字去管理器的缓存里找。
+            let resolved = match registry::find(&call.name) {
+                Some(tool) => Some(tool),
+                None if crate::mcp::protocol::is_mcp_tool(&call.name) => mcp_manager
+                    .cached_tools()
+                    .await
+                    .iter()
+                    .map(|item| {
+                        let server = crate::mcp::protocol::split_tool_name(&item.name)
+                            .map(|(server, _)| server.to_string())
+                            .unwrap_or_default();
+                        registry::mcp_tool_definition(item, &server)
+                    })
+                    .find(|definition| definition.name == call.name),
+                None => None,
+            };
+            let Some(tool) = resolved else {
                 emitter.emit(ChatEvent::ToolError {
                     request_id: request_id.clone(),
                     call_id: call.id.clone(),

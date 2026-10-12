@@ -118,7 +118,12 @@ const server = createServer(async (req, res) => {
   }
 
   // ① 工具调用：让应用去执行一个 MCP 工具
-  if (lastText.includes("@tool") && toolInfo.mcp) {
+  //
+  // ⚠️ 必须判断"这一轮里已经有过工具结果了吗"：第一次跑的时候我漏了这一条，
+  // 于是每一轮都再要一次工具 —— 应用就一轮轮地调下去（日志里 消息=2 → 4 → 6 → 8），
+  // 永远不会给出最终回答。**假模型也得讲道理**，否则验的是它的毛病而不是应用的。
+  const alreadyRanTool = messages.some((m) => m.role === "tool");
+  if (lastText.includes("@tool") && toolInfo.mcp && !alreadyRanTool) {
     const args = JSON.stringify({ text: "来自 mock 的回声" });
     console.log(`  → 回一个 tool_call：${toolInfo.mcp}(${args})`);
     if (body.stream) {

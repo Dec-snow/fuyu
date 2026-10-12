@@ -353,6 +353,17 @@ function purgeEmptyConversations(keep) {
   return toDelete;
 }
 
+
+/** 最后一条助手消息里带的图片（原样存的是 JSON 数组）。 */
+function lastAssistantImages() {
+  const db = new DatabaseSync(dbPath());
+  const row = db
+    .prepare("SELECT images_json FROM messages WHERE role = 'assistant' ORDER BY created_at DESC LIMIT 1")
+    .get();
+  db.close();
+  return row ? String(row.images_json ?? "") : "";
+}
+
 const scenarios = {
   /**
    * 编写区的那几个控件是不是真的接上了状态。
@@ -713,7 +724,17 @@ const scenarios = {
     try {
         // 图片不一定是 <img>：data URL 往往挂在 style 的 background-image 上。
         // 判据取"整个 DOM 里出现过 data:image"，比盯某个标签稳。
-        await waitFor(`document.body.innerHTML.includes("data:image")`, "图片出现", 45000);
+        // 判据要**三者取或**（上一轮我只留下了一个，反而更窄了）：
+        //   · <img class="bubble-image"> —— 消息里的图片就是这个标签（读源码确认过）
+        //   · DOM 里出现 data:image —— 万一以后改成 background-image 也认
+        //   · 「↻ 重新生成」按钮 —— 它是生成成功后立刻出现的（图片渲染要等一次 DB 回读）
+        await waitFor(
+          `document.querySelectorAll("img.bubble-image").length > 0 ||
+           document.body.innerHTML.includes("data:image") ||
+           Array.from(document.querySelectorAll("button")).some((b) => (b.textContent ?? "").includes("重新生成"))`,
+          "图片出现（bubble-image / data:image / 重新生成）",
+          45000,
+        );
     } catch {
       const dump = await evalJs(`
         const notices = Array.from(document.querySelectorAll(".notice, .toast, .error"))
@@ -749,7 +770,12 @@ const scenarios = {
     console.log(`  图片 ${shown.count} 张，最后一张 src 开头：${shown.src}`);
     if (shown.notices) console.log(`  提示：${shown.notices.slice(0, 100)}`);
     const hasImage = shown.count > 0 || shown.styleImage || shown.regenerate;
-    assert(hasImage, "界面上出现了图片（img / background-image / 重新生成 三者之一）");
+    // ⚠️ 上面这条可以被「重新生成」按钮满足，所以**单独它不算证据**。
+    // 真正的证据是：落库的那条助手消息里确实带着图片（images_json 非空且是 data URL）。
+    const stored = lastAssistantImages();
+    console.log(`  落库的图片字段：${stored.slice(0, 40)}…（${stored.length} 字符）`);
+    assert(stored.includes("data:image"), "落库的助手消息里确实带着图片（不是只有按钮）");
+    assert(hasImage, "界面上出现了图片相关的元素（三者之一）");
     if (shown.count > 0) {
       assert(shown.src.startsWith("data:image") || shown.src.startsWith("http"), `图片是 data URL 或 http：${shown.src}`);
     }

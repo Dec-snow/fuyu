@@ -54,12 +54,17 @@ if (tables().includes("conversations")) {
   const rows = db
     .prepare(
       `SELECT c.id, c.title,
-              (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id) AS n
+              (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id) AS n,
+              (SELECT m.content FROM messages m
+                WHERE m.conversation_id = c.id AND m.role = 'user' LIMIT 1) AS first_user
        FROM conversations c`,
     )
     .all();
   for (const row of rows) {
-    const isTestTitle = TEST_TITLE.test(String(row.title ?? ""));
+    // 判据用**标题 + 首条用户消息**：标题常常是应用默认的「新对话」，
+    // 而首条消息就是驱动发的测试文案（例如「端到端验证：画一只猫」）—— 更准。
+    const isTestTitle =
+      TEST_TITLE.test(String(row.title ?? "")) || TEST_TITLE.test(String(row.first_user ?? ""));
     const isEmpty = Number(row.n) === 0;
     if (!isTestTitle && !isEmpty) continue;
     if (tables().includes("messages") && hasColumn("messages", "conversation_id")) {

@@ -70,6 +70,16 @@ pub struct SettingsPatch {
     pub skills: Option<Vec<Skill>>,
     /// MCP 服务器列表（整表覆写）。
     pub mcp_servers: Option<Vec<McpServerConfig>>,
+    /// 文生图用哪个服务商 / 哪个模型 / 什么尺寸。
+    pub image_provider_id: Option<String>,
+    pub image_model: Option<String>,
+    pub image_size: Option<String>,
+    /// 从哪个仓库查更新（`用户名/仓库名`）。
+    pub update_repo: Option<String>,
+    /// 启动时自动查一次更新。
+    pub check_updates_on_start: Option<bool>,
+    /// 用户跳过的新版本号（不提示它）。
+    pub skipped_version: Option<String>,
 }
 
 /// 角色数量上限。
@@ -158,6 +168,36 @@ fn sanitize_mcp_servers(servers: Vec<McpServerConfig>) -> AppResult<Vec<McpServe
         out.push(server);
     }
     Ok(out)
+}
+
+/// 校验「用户名/仓库名」。
+///
+/// 这个值会被拼进 GitHub 的 API 地址，所以必须挡住能改变请求目标的东西
+/// （斜杠只能是那一个分隔符、不能有空格与 `#`/`?`，更不能是完整 URL）。
+fn sanitize_update_repo(repo: String) -> AppResult<String> {
+    let repo = repo.trim().to_string();
+    let mut parts = repo.split('/');
+    let (owner, name) = match (parts.next(), parts.next(), parts.next()) {
+        (Some(owner), Some(name), None) => (owner, name),
+        _ => {
+            return Err(AppError::invalid(
+                "仓库名要写成 `用户名/仓库名` 的形式，例如 Dec-snow/fuyu",
+            ))
+        }
+    };
+    let ok = |part: &str| {
+        !part.is_empty()
+            && part.len() <= 100
+            && part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    };
+    if !ok(owner) || !ok(name) {
+        return Err(AppError::invalid(
+            "仓库名里只能有字母、数字、`-`、`_`、`.`（不能带空格或完整网址）",
+        ));
+    }
+    Ok(format!("{owner}/{name}"))
 }
 
 /// 规整技能列表。
@@ -433,6 +473,31 @@ pub async fn update_settings(
         if let Some(servers) = patch.mcp_servers {
             cfg.mcp_servers = sanitize_mcp_servers(servers)?;
         }
+        // ---- 检查更新 ----
+        // ⚠️ 这三个字段本来**不在** `SettingsPatch` 里，而 serde 默认忽略未知字段 ——
+        // 于是界面上「启动时检查一次」点下去**静默不保存**，保存后回读还把开关弹回原样。
+        // 这是真机端到端测试才抓到的：单测与 SSR 覆盖不到「界面 → 命令 → 磁盘」。
+        if let Some(repo) = patch.update_repo {
+            cfg.update_repo = sanitize_update_repo(repo)?;
+        }
+        if let Some(check) = patch.check_updates_on_start {
+            cfg.check_updates_on_start = check;
+        }
+        if let Some(version) = patch.skipped_version {
+            cfg.skipped_version = version.trim().to_string();
+        }
+        // ---- 文生图 ----（同样的问题：这三项之前不在补丁里，界面上选完等于没选）
+        if let Some(provider) = patch.image_provider_id {
+            cfg.image_provider_id = provider.trim().to_string();
+        }
+        if let Some(model) = patch.image_model {
+            cfg.image_model = model.trim().to_string();
+        }
+        if let Some(size) = patch.image_size {
+            // 复用画图那条校验：格式不对要报错，而不是悄悄回落到默认
+            crate::api::image::validate_size(size.trim())?;
+            cfg.image_size = size.trim().to_string();
+        }
         // 改完代理立刻重建 HTTP 客户端，否则要重启才生效。
         Ok(cfg.clone())
     })
@@ -529,6 +594,54 @@ mod tests {
             args: Vec::new(),
             env: Default::default(),
             enabled: true,
+        }
+    }
+
+    /// 这条测试防的是「字段漏写在 `SettingsPatch` 里」这一类 bug。
+    ///
+    /// serde 默认**忽略未知字段**，所以少写一个字段的后果是：界面上点下去
+    /// 静默不保存、不报任何错，保存后回读还会把开关弹回原样。
+    /// 真机端到端测试抓到的正是这个（`checkUpdatesOnStart` 曾经就漏了）。
+    #[test]
+    fn the_patch_accepts_every_field_the_ui_sends() {
+        let patch: SettingsPatch = serde_json::from_value(serde_json::json!({
+            "updateRepo": "Dec-snow/fuyu",
+            "checkUpdatesOnStart": false,
+            "skippedVersion": "v0.2.0",
+            "imageProviderId": "p-image",
+            "imageModel": "dall-e-3",
+            "imageSize": "1024x1024",
+        }))
+        .unwrap();
+        assert_eq!(patch.update_repo.as_deref(), Some("Dec-snow/fuyu"));
+        assert_eq!(patch.check_updates_on_start, Some(false));
+        assert_eq!(patch.skipped_version.as_deref(), Some("v0.2.0"));
+        assert_eq!(patch.image_provider_id.as_deref(), Some("p-image"));
+        assert_eq!(patch.image_model.as_deref(), Some("dall-e-3"));
+        assert_eq!(patch.image_size.as_deref(), Some("1024x1024"));
+    }
+
+    #[test]
+    fn an_update_repo_must_look_like_owner_slash_name() {
+        assert_eq!(
+            sanitize_update_repo(" Dec-snow/fuyu ".to_string()).unwrap(),
+            "Dec-snow/fuyu"
+        );
+        // 这个值会被拼进 GitHub 的 API 地址，所以能改变目标的东西都要挡住
+        for bad in [
+            "",
+            "fuyu",
+            "a/b/c",
+            "https://github.com/Dec-snow/fuyu",
+            "Dec-snow/fuyu?x=1",
+            "Dec snow/fuyu",
+            "Dec-snow/fuyu#frag",
+            "owner/名字",
+        ] {
+            assert!(
+                sanitize_update_repo(bad.to_string()).is_err(),
+                "{bad} 不该被接受"
+            );
         }
     }
 

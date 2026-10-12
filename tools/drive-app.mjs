@@ -13,8 +13,9 @@
 // 它自己启动应用（带 --remote-debugging-port），跑完杀掉。应用路径可用 --exe= 覆盖。
 
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 
 const args = Object.fromEntries(
   process.argv.slice(2).map((a) => {
@@ -178,6 +179,85 @@ async function switchTab(label) {
 }
 
 const scenarios = {
+  /**
+   * 设置项**真的落盘**了吗。
+   *
+   * 这条测的是「界面 → 后端 →磁盘」整条链路：在界面上点一个复选框，
+   * 然后去读应用自己的配置文件，看它是否真的变了；最后再点回来，
+   * 确认能恢复原状（不把用户的配置留在被改过的状态）。
+   *
+   * 为什么值得单独测：设置页的开关很容易出现「界面看着切了，其实没保存」
+   * 或者「保存了但键名对不上」—— 单测覆盖不到这种跨进程的事。
+   */
+  async persistence() {
+    const configPath = join(homedir(), "AppData", "Roaming", "com.floatai.desktop", "providers.json");
+    const readFlag = () => {
+      try {
+        return JSON.parse(readFileSync(configPath, "utf8")).checkUpdatesOnStart;
+      } catch {
+        return null;
+      }
+    };
+
+    const before = readFlag();
+    assert(before !== null, `读到了配置文件：${configPath}`);
+    assert(typeof before === "boolean", `「启动时检查一次」当前是 ${before}`);
+
+    await openSettings();
+    await switchTab("关于");
+
+    const toggle = () =>
+      evalJs(`
+        const label = Array.from(document.querySelectorAll(".settings-body label")).find((el) =>
+          (el.textContent ?? "").includes("启动时检查一次"));
+        if (!label) throw new Error("找不到「启动时检查一次」");
+        const input = label.querySelector('input[type="checkbox"]');
+        if (!input) throw new Error("找不到那个复选框");
+        input.click();
+        return input.checked;
+      `);
+
+    await toggle();
+    // 先把点击之后的界面状态看清楚，再判断是"没保存"还是"根本没点到"
+    const afterClick = await evalJs(`
+      const label = Array.from(document.querySelectorAll(".settings-body label")).find((el) =>
+        (el.textContent ?? "").includes("启动时检查一次"));
+      const input = label?.querySelector('input[type="checkbox"]');
+      const notices = Array.from(document.querySelectorAll(".notice, .toast, .banner"))
+        .map((el) => el.innerText.replace(/\\n+/g, " "))
+        .join(" | ");
+      return {
+        checked: input ? input.checked : null,
+        labelCount: Array.from(document.querySelectorAll(".settings-body label")).filter((el) =>
+          (el.textContent ?? "").includes("启动时检查一次")).length,
+        notices,
+        tail: document.body.innerText.replace(/\\n+/g, " ").slice(-160),
+      };
+    `);
+    console.log(`  点击瞬间（React 还没重渲染）：checked=${afterClick.checked}  同名标签 ${afterClick.labelCount} 个`);
+    if (afterClick.notices) console.log(`  界面提示：${afterClick.notices}`);
+    console.log(`  界面尾部文字：${afterClick.tail}`);
+
+    // 等**磁盘上**的值变过来 —— 不是等界面，界面变得比磁盘早
+    let after = before;
+    for (let i = 0; i < 40 && after === before; i += 1) {
+      await new Promise((r) => setTimeout(r, 150));
+      after = readFlag();
+    }
+    assert(after === !before, `界面上的点击落到了磁盘：${before} → ${after}`);
+
+    // 恢复原状，并且确认恢复也落了盘
+    await toggle();
+    let restored = after;
+    for (let i = 0; i < 40 && restored !== before; i += 1) {
+      await new Promise((r) => setTimeout(r, 150));
+      restored = readFlag();
+    }
+    assert(restored === before, `恢复原状也落到了磁盘：${restored}`);
+
+    await closeSettings();
+  },
+
   /** 应用起得来、界面在、关键控件都在。 */
   async smoke() {
     const info = await evalJs(`

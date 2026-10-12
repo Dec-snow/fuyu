@@ -808,7 +808,7 @@ textarea {
   font-size: 12px;
 }
 
-/* 原生 file input 藏起来，只留「📄 文件」这个 label 当按钮 */}
+/* 原生 file input 藏起来，只留「📄 文件」这个 label 当按钮 */
 .file-pick {
   cursor: pointer;
   display: inline-flex;

@@ -887,6 +887,80 @@ const scenarios = {
       return true;
     `);
   },
+  /**
+   * 用**真实服务商**跑一条聊天（Key 从环境变量读，存进应用的凭据管理器）。
+   *
+   * 与 chatStream（本地假模型）的分工：
+   *   - 假模型验的是"应用这一侧"（请求怎么发、SSE 怎么解析、气泡怎么更新）；
+   *   - 这一条验的是"我们发的请求格式与真实服务商兼容不兼容" —— 那是假模型验不到的。
+   *
+   * Key 的处理：从 process.env.FUYU_TEST_KEY 读，**只通过界面存进凭据管理器**
+   * （应用的设计就是 Key 不进配置文件），所以仓库里不会出现它。
+   */
+  async realChat() {
+    const key = process.env.FUYU_TEST_KEY;
+    if (!key) throw new Error("没有设置 FUYU_TEST_KEY 环境变量");
+    await expandWindow();
+    const before = dbCounts();
+
+    // 存 Key：设置 → 模型 → 找到 Hoarfrost 那一块 → 填 Key → 保存 Key
+    await openSettings();
+    await switchTab("模型");
+    const stored = await evalJs(`
+      // 选择器来自源码：服务商卡片是 .provider-card，名字在 .provider-name 里，
+      // Key 输入框是 type="password"，按钮文案是「保存 Key」。
+      // 第一版我按 .field 找，结果命中了文生图那一段（它也含有服务商名字）。
+      const cards = Array.from(document.querySelectorAll(".provider-card"));
+      const block = cards.find((el) => (el.querySelector(".provider-name")?.textContent ?? "").trim() === "Hoarfrost");
+      if (!block) {
+        return { ok: false, sample: cards.map((el) => (el.querySelector(".provider-name")?.textContent ?? "?").trim()) };
+      }
+      const input = block.querySelector('input[type="password"]');
+      if (!input) return { ok: false, inputs: Array.from(block.querySelectorAll("input")).map((el) => el.type) };
+      window.__dsh.setValue(input, ${JSON.stringify(key)});
+      const button = Array.from(block.querySelectorAll("button")).find((b) => (b.textContent ?? "").includes("保存 Key"));
+      if (button) button.click();
+      return { ok: true };
+    `);
+    if (!stored.ok) throw new Error(`没找到 Hoarfrost 的 Key 输入框：${JSON.stringify(stored)}`);
+    await new Promise((r) => setTimeout(r, 1500));
+    await closeSettings();
+
+    // 发一条真实消息
+    const question = "用一句话说明你是谁";
+    await evalJs(`
+      window.__dsh.setValue(document.querySelector("textarea"), ${JSON.stringify(question)});
+      return true;
+    `);
+    await new Promise((r) => setTimeout(r, 200));
+    await evalJs(`window.__dsh.clickText("button", "发送"); return true;`);
+
+    await waitFor(
+      `Array.from(document.querySelectorAll('[class*="bubble"]')).some((el) =>
+        (el.innerText ?? "").trim().length > 12 && !el.innerText.includes("用一句话说明你是谁"))`,
+      "真实模型的回复出现",
+      90000,
+    );
+    const reply = await evalJs(`
+      const bubbles = Array.from(document.querySelectorAll('[class*="bubble"]'))
+        .map((el) => el.innerText.trim()).filter((text) => text.length > 12);
+      return bubbles.at(-1) ?? "";
+    `);
+    console.log(`  真实模型回复：${reply.replace(/\\n+/g, " ").slice(0, 120)}`);
+    assert(reply.length > 0, "拿到了真实模型的回复");
+    assert(!reply.includes("[object Object]"), "回复不是错误占位");
+
+    // 落库发生在**流结束之后**：界面上的字是流式过来的，比落库早。
+    // 直接查一次 DB 会看到"只多了 1 条" —— 第一版就是这样误报的。
+    let after = dbCounts();
+    for (let i = 0; i < 40 && after.messages < before.messages + 2; i += 1) {
+      await new Promise((r) => setTimeout(r, 250));
+      after = dbCounts();
+    }
+    console.log(`  数据库：消息 ${before.messages} → ${after.messages}`);
+    assert(after.messages >= before.messages + 2, "一问一答都落库了");
+    await cleanupNewConversations(before.conversations);
+  },
   async mcpScan() {
     await openSettings();
     await switchTab("通用");
